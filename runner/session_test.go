@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -363,6 +365,45 @@ func TestSessionPermissionDeny(t *testing.T) {
 	}
 	if result, err := next.Wait(); err != nil || !result.Success || result.Text != "echo 2: carry on" {
 		t.Fatalf("session unusable after denied turn: %+v %v", result, err)
+	}
+}
+
+// Extra dirs are linked into the working directory for the process lifetime
+// and cleaned up when the process exits.
+func TestSessionExtraDirs(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "SKILL.md"), []byte("skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	session := openSession(t, runner.SessionRequest{
+		WorkDir:   work,
+		ExtraDirs: []runner.ExtraDir{{Source: source}},
+	})
+	link := filepath.Join(work, ".claude", filepath.Base(source))
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("extra dir not linked: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("target is not a symlink: %v", info.Mode())
+	}
+	if data, err := os.ReadFile(filepath.Join(link, "SKILL.md")); err != nil || string(data) != "skill" {
+		t.Fatalf("link does not resolve to source content: %q %v", data, err)
+	}
+
+	turn, err := session.Send(context.Background(), runner.TurnInput{Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := turn.Wait(); err != nil || !result.Success {
+		t.Fatalf("turn failed: %+v %v", result, err)
+	}
+
+	_ = session.Close()
+	<-session.Dead()
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("link must be removed after process exit: %v", err)
 	}
 }
 

@@ -38,6 +38,7 @@ type Request struct {
 	Permission         PermissionMode    `json:"permission,omitempty"`
 	Env                map[string]string `json:"env,omitempty"`
 	ExtraArgs          []string          `json:"extra_args,omitempty"`
+	ExtraDirs          []ExtraDir        `json:"extra_dirs,omitempty"`
 	WallTimeout        time.Duration     `json:"-"`
 	IdleTimeout        time.Duration     `json:"-"`
 	MaxFrameBytes      int               `json:"max_frame_bytes,omitempty"`
@@ -57,6 +58,23 @@ type CommandSpec struct {
 	// Interactive requests a writable stdin pipe instead of the static Stdin
 	// bytes. The started Process must implement StdinWriter.
 	Interactive bool
+	// ExtraDirs are context directories the executor exposes inside Dir before
+	// the process starts (host: symlinks; future backends: mounts).
+	ExtraDirs []ExtraDir
+}
+
+// ExtraDir exposes agent context (skills, agents, commands, ...) from a source
+// directory inside the process working directory for the lifetime of the
+// process. The executor owns placement: the host backend symlinks and removes
+// the links it created when the process exits; links it merely adopted
+// (already pointing at Source) are left alone.
+type ExtraDir struct {
+	// Source is the directory to expose, e.g. /repos/myproj/.claude/skills.
+	Source string `json:"source"`
+	// Target is the link location relative to the working directory. It must
+	// not be absolute or escape the working directory. Empty means
+	// ".claude/<basename(Source)>".
+	Target string `json:"target,omitempty"`
 }
 
 // SessionRequest opens one persistent agent process that accepts many turns.
@@ -75,6 +93,7 @@ type SessionRequest struct {
 	Permission         PermissionMode    `json:"permission,omitempty"`
 	Env                map[string]string `json:"env,omitempty"`
 	ExtraArgs          []string          `json:"extra_args,omitempty"`
+	ExtraDirs          []ExtraDir        `json:"extra_dirs,omitempty"`
 	// TurnIdleTimeout is the default per-turn no-output timeout. It fires only
 	// while a turn is in flight; an idle session between turns never trips it.
 	TurnIdleTimeout time.Duration `json:"-"`

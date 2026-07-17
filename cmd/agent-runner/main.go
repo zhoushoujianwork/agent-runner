@@ -68,8 +68,10 @@ func runTurn(args []string, stdout io.Writer) error {
 	disallowedTools := flags.String("disallowed-tools", "", "comma-separated disallowed tools")
 	var env keyValues
 	var extraArgs stringsFlag
+	var extraDirs extraDirsFlag
 	flags.Var(&env, "env", "environment override KEY=VALUE; repeatable")
 	flags.Var(&extraArgs, "extra-arg", "extra Claude argument; repeatable")
+	flags.Var(&extraDirs, "extra-dir", "context dir symlinked into cwd, SOURCE[=TARGET]; repeatable")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -80,7 +82,7 @@ func runTurn(args []string, stdout io.Writer) error {
 	var request runner.Request
 	var err error
 	if *requestPath != "" {
-		if *prompt != "" || *cwd != "" || *model != "" || *resume != "" || *newSession != "" || len(env) != 0 || len(extraArgs) != 0 {
+		if *prompt != "" || *cwd != "" || *model != "" || *resume != "" || *newSession != "" || len(env) != 0 || len(extraArgs) != 0 || len(extraDirs) != 0 {
 			return errors.New("--request cannot be combined with request field flags")
 		}
 		request, err = readRequest(*requestPath)
@@ -102,6 +104,7 @@ func runTurn(args []string, stdout io.Writer) error {
 			DisallowedTools: splitList(*disallowedTools),
 			Env:             map[string]string(env),
 			ExtraArgs:       append([]string(nil), extraArgs...),
+			ExtraDirs:       append([]runner.ExtraDir(nil), extraDirs...),
 		}
 	}
 
@@ -160,6 +163,7 @@ type requestDocument struct {
 	Permission         runner.PermissionMode `json:"permission"`
 	Env                map[string]string     `json:"env"`
 	ExtraArgs          []string              `json:"extra_args"`
+	ExtraDirs          []runner.ExtraDir     `json:"extra_dirs"`
 	WallTimeout        string                `json:"wall_timeout"`
 	IdleTimeout        string                `json:"idle_timeout"`
 	MaxFrameBytes      int                   `json:"max_frame_bytes"`
@@ -191,7 +195,7 @@ func readRequest(path string) (runner.Request, error) {
 		Continue:     document.Continue, MaxTurns: document.MaxTurns,
 		AllowedTools: document.AllowedTools, DisallowedTools: document.DisallowedTools,
 		MCPConfig: document.MCPConfig, Permission: document.Permission,
-		Env: document.Env, ExtraArgs: document.ExtraArgs,
+		Env: document.Env, ExtraArgs: document.ExtraArgs, ExtraDirs: document.ExtraDirs,
 		MaxFrameBytes: document.MaxFrameBytes, MaxStderrBytes: document.MaxStderrBytes,
 	}
 	var err error
@@ -231,6 +235,18 @@ type stringsFlag []string
 func (v *stringsFlag) String() string { return strings.Join(*v, ",") }
 func (v *stringsFlag) Set(value string) error {
 	*v = append(*v, value)
+	return nil
+}
+
+type extraDirsFlag []runner.ExtraDir
+
+func (v *extraDirsFlag) String() string { return "" }
+func (v *extraDirsFlag) Set(value string) error {
+	source, target, _ := strings.Cut(value, "=")
+	if strings.TrimSpace(source) == "" {
+		return fmt.Errorf("expected SOURCE[=TARGET], got %q", value)
+	}
+	*v = append(*v, runner.ExtraDir{Source: source, Target: target})
 	return nil
 }
 

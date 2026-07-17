@@ -58,6 +58,15 @@ func (e *Executor) Start(ctx context.Context, spec runner.CommandSpec) (runner.P
 		return nil, errors.New("host executor: empty argv")
 	}
 
+	links, err := prepareExtraDirs(spec.Dir, spec.ExtraDirs)
+	if err != nil {
+		return nil, fmt.Errorf("host executor extra dirs: %w", err)
+	}
+	fail := func(err error) (runner.Process, error) {
+		removeLinks(links)
+		return nil, err
+	}
+
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
 	cmd.Dir = spec.Dir
 	cmd.Env = e.environment(spec.Env)
@@ -65,7 +74,7 @@ func (e *Executor) Start(ctx context.Context, spec runner.CommandSpec) (runner.P
 	if spec.Interactive {
 		pipe, err := cmd.StdinPipe()
 		if err != nil {
-			return nil, fmt.Errorf("host executor stdin: %w", err)
+			return fail(fmt.Errorf("host executor stdin: %w", err))
 		}
 		stdinWriter = pipe
 	} else {
@@ -75,13 +84,13 @@ func (e *Executor) Start(ctx context.Context, spec runner.CommandSpec) (runner.P
 
 	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
-		return nil, fmt.Errorf("host executor stdout: %w", err)
+		return fail(fmt.Errorf("host executor stdout: %w", err))
 	}
 	stderr, stderrWriter, err := os.Pipe()
 	if err != nil {
 		_ = stdout.Close()
 		_ = stdoutWriter.Close()
-		return nil, fmt.Errorf("host executor stderr: %w", err)
+		return fail(fmt.Errorf("host executor stderr: %w", err))
 	}
 	cmd.Stdout = stdoutWriter
 	cmd.Stderr = stderrWriter
@@ -90,7 +99,7 @@ func (e *Executor) Start(ctx context.Context, spec runner.CommandSpec) (runner.P
 		_ = stdoutWriter.Close()
 		_ = stderr.Close()
 		_ = stderrWriter.Close()
-		return nil, fmt.Errorf("host executor start %q: %w", spec.Argv[0], err)
+		return fail(fmt.Errorf("host executor start %q: %w", spec.Argv[0], err))
 	}
 	_ = stdoutWriter.Close()
 	_ = stderrWriter.Close()
@@ -101,6 +110,7 @@ func (e *Executor) Start(ctx context.Context, spec runner.CommandSpec) (runner.P
 		stdout: stdout,
 		stderr: stderr,
 		grace:  e.terminationGrace,
+		links:  links,
 		done:   make(chan struct{}),
 	}
 	go process.reap()
@@ -148,6 +158,7 @@ type hostProcess struct {
 	stdout io.Reader
 	stderr io.Reader
 	grace  time.Duration
+	links  []string // extra-dir symlinks owned by this process, removed on reap
 	done   chan struct{}
 
 	cancelOnce sync.Once
@@ -191,6 +202,7 @@ func (p *hostProcess) Cancel() error {
 
 func (p *hostProcess) reap() {
 	err := p.cmd.Wait()
+	removeLinks(p.links)
 	status := runner.ExitStatus{ExitCode: -1}
 	if p.cmd.ProcessState != nil {
 		status.ExitCode = p.cmd.ProcessState.ExitCode()

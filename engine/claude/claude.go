@@ -88,6 +88,7 @@ func (e *Engine) NewSession(req runner.SessionRequest) (runner.SessionProtocol, 
 			Dir:         req.WorkDir,
 			Env:         cloneMap(req.Env),
 			Interactive: true,
+			ExtraDirs:   append([]runner.ExtraDir(nil), req.ExtraDirs...),
 		},
 	}, nil
 }

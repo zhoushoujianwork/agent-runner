@@ -22,6 +22,7 @@ func TestBuildCommand(t *testing.T) {
 		Permission:      runner.PermissionBypass,
 		AllowedTools:    []string{"Read", "Grep"},
 		Env:             map[string]string{"X": "1"},
+		ExtraDirs:       []runner.ExtraDir{{Source: "/proj/.claude/skills"}},
 		OnPermission: func(context.Context, runner.PermissionRequest) (runner.PermissionDecision, error) {
 			return runner.PermissionDecision{Allow: true}, nil
 		},
