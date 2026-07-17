@@ -73,6 +73,37 @@ type Executor interface {
 	Start(context.Context, CommandSpec) (Process, error)
 }
 
+// TermEngine is the optional capability implemented by engines whose CLI has
+// an interactive TUI mode. NewTerm builds the interactive-TUI process spec (no
+// --print, no wire protocol); the session fields carry the same semantics as
+// SessionRequest so headless and TUI runs of the same conversation resume via
+// the provider's own session mechanism. Engines that lack a TUI mode simply do
+// not implement it, and OpenTerm returns ErrBackendUnsupported.
+type TermEngine interface {
+	NewTerm(TermRequest) (CommandSpec, error)
+}
+
+// PTYExecutor is the optional capability implemented by executors that can
+// place a process inside a pseudo-terminal. StartPTY starts the spec attached
+// to a PTY sized to size and returns a live PTYProcess. Executors without PTY
+// support do not implement it, and OpenTerm returns ErrBackendUnsupported.
+type PTYExecutor interface {
+	StartPTY(ctx context.Context, spec CommandSpec, size TermSize) (PTYProcess, error)
+}
+
+// PTYProcess is one live process attached to a PTY. Output carries the merged
+// raw terminal byte stream (stdout+stderr, VT escape sequences included); the
+// runner never parses it. Reads on Output drain to EOF after the process
+// exits.
+type PTYProcess interface {
+	Input() io.Writer
+	Output() io.Reader
+	Resize(TermSize) error
+	Wait() (ExitStatus, error)
+	Cancel() error
+	PID() int
+}
+
 // StdinWriter is implemented by processes started from an Interactive
 // CommandSpec. The writer stays open across turns; closing it asks the agent
 // process to finish up and exit.

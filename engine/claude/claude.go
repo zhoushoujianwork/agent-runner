@@ -25,18 +25,8 @@ func New(binary string) *Engine {
 // turn ends at that turn's `result` frame. One-shot runs use the same protocol
 // and simply close stdin after the first turn.
 func (e *Engine) NewSession(req runner.SessionRequest) (runner.SessionProtocol, error) {
-	conversationModes := 0
-	if req.ResumeSessionID != "" {
-		conversationModes++
-	}
-	if req.NewSessionID != "" {
-		conversationModes++
-	}
-	if req.Continue {
-		conversationModes++
-	}
-	if conversationModes > 1 {
-		return nil, &runner.RunError{Kind: runner.ErrorInvalidRequest, Op: "claude session build", Err: errors.New("resume_session_id, new_session_id, and continue are mutually exclusive")}
+	if err := conversationMode(req.ResumeSessionID, req.NewSessionID, req.Continue); err != nil {
+		return nil, &runner.RunError{Kind: runner.ErrorInvalidRequest, Op: "claude session build", Err: err}
 	}
 
 	args := []string{
@@ -91,6 +81,73 @@ func (e *Engine) NewSession(req runner.SessionRequest) (runner.SessionProtocol, 
 			ExtraDirs:   append([]runner.ExtraDir(nil), req.ExtraDirs...),
 		},
 	}, nil
+}
+
+// NewTerm builds one interactive-TUI claude process. It shares the session
+// argv semantics (resume/session-id/continue/model/append-system-prompt/
+// permission/mcp/tools) with NewSession, differing only in that it carries no
+// wire-protocol flags (--print/--output-format/--input-format/--verbose/
+// --include-partial-messages): the process is the interactive TUI itself.
+func (e *Engine) NewTerm(req runner.TermRequest) (runner.CommandSpec, error) {
+	if err := conversationMode(req.ResumeSessionID, req.NewSessionID, req.Continue); err != nil {
+		return runner.CommandSpec{}, &runner.RunError{Kind: runner.ErrorInvalidRequest, Op: "claude term build", Err: err}
+	}
+
+	args := []string{e.Binary}
+	if req.Model != "" {
+		args = append(args, "--model", req.Model)
+	}
+	if req.ResumeSessionID != "" {
+		args = append(args, "--resume", req.ResumeSessionID)
+	} else if req.NewSessionID != "" {
+		args = append(args, "--session-id", req.NewSessionID)
+	} else if req.Continue {
+		args = append(args, "--continue")
+	}
+	if req.AppendSystemPrompt != "" {
+		args = append(args, "--append-system-prompt", req.AppendSystemPrompt)
+	}
+	if len(req.AllowedTools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(req.AllowedTools, ","))
+	}
+	if len(req.DisallowedTools) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(req.DisallowedTools, ","))
+	}
+	if req.MCPConfig != "" {
+		args = append(args, "--mcp-config", req.MCPConfig)
+	}
+	permission, err := permissionArgs(req.Permission)
+	if err != nil {
+		return runner.CommandSpec{}, &runner.RunError{Kind: runner.ErrorInvalidRequest, Op: "claude term build", Err: err}
+	}
+	args = append(args, permission...)
+	args = append(args, req.ExtraArgs...)
+
+	return runner.CommandSpec{
+		Argv:      args,
+		Dir:       req.WorkDir,
+		Env:       cloneMap(req.Env),
+		ExtraDirs: append([]runner.ExtraDir(nil), req.ExtraDirs...),
+	}, nil
+}
+
+// conversationMode enforces that at most one of resume/new/continue is set;
+// it is shared by NewSession and NewTerm so both modes accept the same request.
+func conversationMode(resumeID, newID string, cont bool) error {
+	modes := 0
+	if resumeID != "" {
+		modes++
+	}
+	if newID != "" {
+		modes++
+	}
+	if cont {
+		modes++
+	}
+	if modes > 1 {
+		return errors.New("resume_session_id, new_session_id, and continue are mutually exclusive")
+	}
+	return nil
 }
 
 func permissionArgs(mode runner.PermissionMode) ([]string, error) {

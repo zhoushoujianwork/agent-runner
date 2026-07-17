@@ -205,3 +205,24 @@ func TestCommandDoesNotExposePrompt(t *testing.T) {
 		t.Fatalf("prompt leaked into argv: %v", args)
 	}
 }
+
+// stubEngine implements Engine but not TermEngine; stubExec implements Executor
+// but not PTYExecutor. OpenTerm must degrade to ErrBackendUnsupported.
+type stubEngine struct{}
+
+func (stubEngine) NewSession(runner.SessionRequest) (runner.SessionProtocol, error) {
+	return nil, errors.New("unused")
+}
+
+type stubExec struct{}
+
+func (stubExec) Start(context.Context, runner.CommandSpec) (runner.Process, error) {
+	return nil, errors.New("unused")
+}
+
+func TestOpenTermUnsupportedBackend(t *testing.T) {
+	r := &runner.Runner{Engine: stubEngine{}, Executor: stubExec{}}
+	if _, err := r.OpenTerm(context.Background(), runner.TermRequest{}); !errors.Is(err, runner.ErrBackendUnsupported) {
+		t.Fatalf("expected ErrBackendUnsupported, got %v", err)
+	}
+}
