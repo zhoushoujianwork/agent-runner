@@ -50,6 +50,41 @@ type CommandSpec struct {
 	Dir   string
 	Env   map[string]string
 	Stdin []byte
+	// Interactive requests a writable stdin pipe instead of the static Stdin
+	// bytes. The started Process must implement StdinWriter.
+	Interactive bool
+}
+
+// SessionRequest opens one persistent agent process that accepts many turns.
+// Turn prompts arrive via Session.Send, never through this request.
+type SessionRequest struct {
+	WorkDir            string            `json:"cwd,omitempty"`
+	Model              string            `json:"model,omitempty"`
+	AppendSystemPrompt string            `json:"append_system_prompt,omitempty"`
+	ResumeSessionID    string            `json:"resume_session_id,omitempty"`
+	NewSessionID       string            `json:"new_session_id,omitempty"`
+	MaxTurns           int               `json:"max_turns,omitempty"`
+	AllowedTools       []string          `json:"allowed_tools,omitempty"`
+	DisallowedTools    []string          `json:"disallowed_tools,omitempty"`
+	MCPConfig          string            `json:"mcp_config,omitempty"`
+	Permission         PermissionMode    `json:"permission,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`
+	ExtraArgs          []string          `json:"extra_args,omitempty"`
+	// TurnIdleTimeout is the default per-turn no-output timeout. It fires only
+	// while a turn is in flight; an idle session between turns never trips it.
+	TurnIdleTimeout time.Duration `json:"-"`
+	// CloseGrace bounds Close's wait for a natural exit after stdin closes
+	// before escalating to Process.Cancel. Zero uses a 3s default.
+	CloseGrace     time.Duration `json:"-"`
+	MaxFrameBytes  int           `json:"max_frame_bytes,omitempty"`
+	MaxStderrBytes int           `json:"max_stderr_bytes,omitempty"`
+}
+
+// TurnInput is one user turn sent into a live session.
+type TurnInput struct {
+	Prompt string `json:"prompt"`
+	// IdleTimeout overrides the session default for this turn; zero inherits.
+	IdleTimeout time.Duration `json:"-"`
 }
 
 type EventType string
@@ -85,11 +120,16 @@ type Usage struct {
 	ModelUsage               map[string]float64 `json:"model_usage,omitempty"`
 }
 
-// Result is the terminal aggregate returned by RunHandle.Wait.
+// Result is the terminal aggregate returned by RunHandle.Wait and
+// TurnHandle.Wait.
 type Result struct {
-	Success    bool   `json:"success"`
-	Text       string `json:"text,omitempty"`
-	SessionID  string `json:"session_id,omitempty"`
+	Success   bool   `json:"success"`
+	Text      string `json:"text,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	// Subtype is the provider's terminal frame subtype when it reports one
+	// (Claude: "success", "error_max_turns", ...). Empty when no result frame
+	// was seen.
+	Subtype    string `json:"subtype,omitempty"`
 	ExitCode   int    `json:"exit_code"`
 	Signal     string `json:"signal,omitempty"`
 	DurationMS int64  `json:"duration_ms"`
@@ -124,6 +164,11 @@ const (
 	ErrorCancelled      ErrorKind = "cancelled"
 	ErrorTimeout        ErrorKind = "timeout"
 	ErrorIdleTimeout    ErrorKind = "idle_timeout"
+	// ErrorBusy: Send was called while a previous turn is still in flight.
+	ErrorBusy ErrorKind = "busy"
+	// ErrorClosed: the session was closed (or the process retired) before or
+	// during the operation.
+	ErrorClosed ErrorKind = "closed"
 )
 
 // RunError is suitable for errors.As and for stable CLI error handling.

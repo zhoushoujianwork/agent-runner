@@ -61,7 +61,16 @@ func (e *Executor) Start(ctx context.Context, spec runner.CommandSpec) (runner.P
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
 	cmd.Dir = spec.Dir
 	cmd.Env = e.environment(spec.Env)
-	cmd.Stdin = bytes.NewReader(spec.Stdin)
+	var stdinWriter io.WriteCloser
+	if spec.Interactive {
+		pipe, err := cmd.StdinPipe()
+		if err != nil {
+			return nil, fmt.Errorf("host executor stdin: %w", err)
+		}
+		stdinWriter = pipe
+	} else {
+		cmd.Stdin = bytes.NewReader(spec.Stdin)
+	}
 	configureProcess(cmd)
 
 	stdout, stdoutWriter, err := os.Pipe()
@@ -88,6 +97,7 @@ func (e *Executor) Start(ctx context.Context, spec runner.CommandSpec) (runner.P
 
 	process := &hostProcess{
 		cmd:    cmd,
+		stdin:  stdinWriter,
 		stdout: stdout,
 		stderr: stderr,
 		grace:  e.terminationGrace,
@@ -134,6 +144,7 @@ func (e *Executor) environment(overrides map[string]string) []string {
 
 type hostProcess struct {
 	cmd    *exec.Cmd
+	stdin  io.WriteCloser
 	stdout io.Reader
 	stderr io.Reader
 	grace  time.Duration
@@ -147,6 +158,11 @@ type hostProcess struct {
 
 func (p *hostProcess) Stdout() io.Reader { return p.stdout }
 func (p *hostProcess) Stderr() io.Reader { return p.stderr }
+
+// StdinWriter exposes the live stdin pipe of an interactive process (nil-safe
+// no-op writer when the spec was not interactive is never needed: the runner
+// checks the capability before use).
+func (p *hostProcess) StdinWriter() io.WriteCloser { return p.stdin }
 
 func (p *hostProcess) PID() int {
 	if p == nil || p.cmd == nil || p.cmd.Process == nil {

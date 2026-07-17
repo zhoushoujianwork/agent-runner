@@ -72,27 +72,11 @@ func (e *Engine) NewRun(req runner.Request) (runner.ProtocolRun, error) {
 	if req.MCPConfig != "" {
 		args = append(args, "--mcp-config", req.MCPConfig)
 	}
-	switch req.Permission {
-	case "", runner.PermissionDefault:
-	case runner.PermissionAcceptEdits:
-		args = append(args, "--permission-mode", "acceptEdits")
-	case runner.PermissionAuto:
-		args = append(args, "--permission-mode", "auto")
-	case runner.PermissionBypass:
-		args = append(args, "--permission-mode", "bypassPermissions")
-	case runner.PermissionManual:
-		args = append(args, "--permission-mode", "manual")
-	case runner.PermissionDontAsk:
-		args = append(args, "--permission-mode", "dontAsk")
-	case runner.PermissionPlan:
-		args = append(args, "--permission-mode", "plan")
-	default:
-		return nil, &runner.RunError{
-			Kind: runner.ErrorInvalidRequest,
-			Op:   "claude build",
-			Err:  fmt.Errorf("unsupported permission mode %q", req.Permission),
-		}
+	permission, err := permissionArgs(req.Permission)
+	if err != nil {
+		return nil, &runner.RunError{Kind: runner.ErrorInvalidRequest, Op: "claude build", Err: err}
 	}
+	args = append(args, permission...)
 	args = append(args, req.ExtraArgs...)
 
 	stdin := append([]byte(req.Prompt), '\n')
@@ -115,6 +99,7 @@ type protocolRun struct {
 	resultSeen    bool
 	resultIsError bool
 	resultError   string
+	resultSubtype string
 }
 
 func (p *protocolRun) Command() runner.CommandSpec { return p.command }
@@ -219,6 +204,7 @@ func (p *protocolRun) ParseLine(line []byte) ([]runner.Event, error) {
 		p.resultIsError = frame.IsError
 		p.finalText = frame.Result
 		p.resultError = frame.Error
+		p.resultSubtype = frame.Subtype
 		p.usage = parseUsage(frame.Usage)
 		if frame.TotalCost != 0 {
 			p.usage.CostUSD = frame.TotalCost
@@ -303,6 +289,7 @@ func (p *protocolRun) Finalize(status runner.ExitStatus, stderr string, duration
 		Success:    status.ExitCode == 0 && p.resultSeen && !p.resultIsError,
 		Text:       p.finalText,
 		SessionID:  p.sessionID,
+		Subtype:    p.resultSubtype,
 		ExitCode:   status.ExitCode,
 		Signal:     status.Signal,
 		DurationMS: duration.Milliseconds(),

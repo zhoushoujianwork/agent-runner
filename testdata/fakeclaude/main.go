@@ -16,6 +16,10 @@ func main() {
 		data, _ := json.Marshal(os.Args[1:])
 		_ = os.WriteFile(path, data, 0o600)
 	}
+	if os.Getenv("FAKE_MODE") == "session" {
+		runSession()
+		return
+	}
 	_, _ = io.ReadAll(os.Stdin)
 	switch os.Getenv("FAKE_MODE") {
 	case "error":
@@ -45,6 +49,69 @@ func main() {
 		fmt.Fprintln(os.Stderr, "diagnostic GH_TOKEN=ghp_supersecret")
 		writeSuccess()
 	}
+}
+
+// runSession is the persistent-session script: emit init, then echo one
+// assistant+result pair per stream-json user frame until stdin closes.
+// FAKE_SESSION_CRASH_TURN=N: emit a partial assistant frame on turn N, then
+// exit 3 without a result (mid-turn death). FAKE_SESSION_HANG_TURN=N: emit one
+// assistant frame on turn N, then stall (turn idle timeout).
+// FAKE_SESSION_MAXTURNS_TURN=N: end turn N with an error_max_turns result.
+func runSession() {
+	const sid = "sess-live"
+	emit(map[string]any{"type": "system", "subtype": "init", "session_id": sid, "model": "claude-test"})
+	crashTurn, _ := strconv.Atoi(os.Getenv("FAKE_SESSION_CRASH_TURN"))
+	hangTurn, _ := strconv.Atoi(os.Getenv("FAKE_SESSION_HANG_TURN"))
+	maxTurnsTurn, _ := strconv.Atoi(os.Getenv("FAKE_SESSION_MAXTURNS_TURN"))
+
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	turn := 0
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) == "" {
+			continue
+		}
+		turn++
+		var frame struct {
+			Message struct {
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		_ = json.Unmarshal(scanner.Bytes(), &frame)
+		text := ""
+		if len(frame.Message.Content) > 0 {
+			text = frame.Message.Content[0].Text
+		}
+		reply := fmt.Sprintf("echo %d: %s", turn, text)
+
+		switch turn {
+		case crashTurn:
+			emitAssistant(sid, "partial work before dying")
+			fmt.Fprintln(os.Stderr, "fatal: simulated mid-turn crash")
+			os.Exit(3)
+		case hangTurn:
+			emitAssistant(sid, "one line then silence")
+			time.Sleep(30 * time.Second)
+		case maxTurnsTurn:
+			emit(map[string]any{"type": "result", "subtype": "error_max_turns", "is_error": false, "result": "", "session_id": sid})
+			continue
+		}
+		emitAssistant(sid, reply)
+		emit(successResult(sid, reply))
+	}
+}
+
+func emitAssistant(sessionID, text string) {
+	emit(map[string]any{
+		"type":       "assistant",
+		"session_id": sessionID,
+		"message": map[string]any{
+			"content": []any{map[string]any{"type": "text", "text": text}},
+			"usage":   map[string]any{"input_tokens": 7, "output_tokens": 3},
+		},
+	})
 }
 
 func writeSuccess() {
