@@ -71,7 +71,7 @@ func runTurn(args []string, stdout io.Writer) error {
 	var extraDirs extraDirsFlag
 	flags.Var(&env, "env", "environment override KEY=VALUE; repeatable")
 	flags.Var(&extraArgs, "extra-arg", "extra Claude argument; repeatable")
-	flags.Var(&extraDirs, "extra-dir", "context dir symlinked into cwd, SOURCE[=TARGET]; repeatable")
+	flags.Var(&extraDirs, "extra-dir", "context root whose .claude/.agent content is merged into cwd, SOURCE[=TARGET for exact link]; repeatable")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}

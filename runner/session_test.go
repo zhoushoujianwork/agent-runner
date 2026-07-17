@@ -368,22 +368,26 @@ func TestSessionPermissionDeny(t *testing.T) {
 	}
 }
 
-// Extra dirs are linked into the working directory for the process lifetime
-// and cleaned up when the process exits.
+// Extra dirs: a context root's .claude content is discovered and merged into
+// the working directory for the process lifetime, then cleaned up on exit.
 func TestSessionExtraDirs(t *testing.T) {
-	source := t.TempDir()
-	if err := os.WriteFile(filepath.Join(source, "SKILL.md"), []byte("skill"), 0o644); err != nil {
+	root := t.TempDir()
+	skill := filepath.Join(root, ".claude", "skills", "review")
+	if err := os.MkdirAll(skill, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("skill"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	work := t.TempDir()
 	session := openSession(t, runner.SessionRequest{
 		WorkDir:   work,
-		ExtraDirs: []runner.ExtraDir{{Source: source}},
+		ExtraDirs: []runner.ExtraDir{{Source: root}},
 	})
-	link := filepath.Join(work, ".claude", filepath.Base(source))
+	link := filepath.Join(work, ".claude", "skills", "review")
 	info, err := os.Lstat(link)
 	if err != nil {
-		t.Fatalf("extra dir not linked: %v", err)
+		t.Fatalf("skill not linked: %v", err)
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("target is not a symlink: %v", info.Mode())

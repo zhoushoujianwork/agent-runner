@@ -63,18 +63,34 @@ type CommandSpec struct {
 	ExtraDirs []ExtraDir
 }
 
-// ExtraDir exposes agent context (skills, agents, commands, ...) from a source
-// directory inside the process working directory for the lifetime of the
-// process. The executor owns placement: the host backend symlinks and removes
-// the links it created when the process exits; links it merely adopted
-// (already pointing at Source) are left alone.
+// ExtraDir exposes agent context from a source directory inside the process
+// working directory, so the agent CLI's own discovery mechanism (.claude,
+// .agent) picks it up. The executor owns placement: the host backend symlinks;
+// future backends may mount.
+//
+// Default (Target empty) is discovery mode: Source is a context root (e.g. a
+// project checkout). Its .claude/ and .agent/ convention directories are
+// scanned and the entries of their content dirs (skills/, agents/, commands/)
+// are linked one by one into the corresponding place under the working
+// directory — Source/.claude/skills/foo appears as <cwd>/.claude/skills/foo.
+// Entries already present locally win and are skipped; identical existing
+// links are adopted without ownership; a Source without convention dirs is a
+// silent no-op.
+//
+// Setting Target switches to exact mode: Source itself is linked at Target
+// (relative to the working directory, no escaping), and an existing Target is
+// an error.
 type ExtraDir struct {
-	// Source is the directory to expose, e.g. /repos/myproj/.claude/skills.
+	// Source is the context root directory (discovery mode) or the directory
+	// to link verbatim (exact mode).
 	Source string `json:"source"`
-	// Target is the link location relative to the working directory. It must
-	// not be absolute or escape the working directory. Empty means
-	// ".claude/<basename(Source)>".
+	// Target, when set, selects exact mode and is the link location relative
+	// to the working directory.
 	Target string `json:"target,omitempty"`
+	// Keep leaves the created links in place after the process exits. The
+	// default removes every link this run created (never adopted ones), so
+	// workspaces do not accumulate stale links to moved or deleted sources.
+	Keep bool `json:"keep,omitempty"`
 }
 
 // SessionRequest opens one persistent agent process that accepts many turns.

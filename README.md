@@ -41,8 +41,10 @@ Implemented:
 - wall and idle timeouts, Unix process-group termination, bounded
   secret-redacted stderr capture
 - shell-free argv execution and `CLAUDECODE` environment stripping
-- extra dirs: project agent context (`.claude/skills/`, agents, commands, …)
-  symlinked into the process working directory for the process lifetime
+- extra dirs: point at a context root (a project checkout) and its
+  `.claude`/`.agent` skills, agents and commands are merged into the process
+  working directory entry by entry, so the CLI's own discovery picks them up;
+  local entries win, links are removed on exit unless `Keep`
 - fake-Claude contract tests that consume no model quota
 
 Not implemented yet: CLI `serve` mode for sessions, Docker and remote sandbox
@@ -102,12 +104,13 @@ session, err := r.OpenSession(ctx, runner.SessionRequest{
     WorkDir:         "/workspaces/task-42",
     TurnIdleTimeout: 5 * time.Minute,
     // Project agent context appears inside the workspace for the lifetime of
-    // the process: /workspaces/task-42/.claude/skills -> the project's skills.
-    // The host backend symlinks (docker will mount); links the runner created
-    // are removed when the process exits.
+    // the process: the root's .claude/.agent skills, agents and commands are
+    // merged entry by entry (local entries win), so the CLI's own discovery
+    // mechanism picks them up. Links are removed on exit unless Keep is set;
+    // Target switches to an exact single link.
     ExtraDirs: []runner.ExtraDir{
-        {Source: "/repos/myproj/.claude/skills"},              // -> .claude/skills
-        {Source: "/shared/agents", Target: ".claude/agents"},  // explicit target
+        {Source: "/repos/myproj"},                             // discovery mode
+        {Source: "/shared/context", Target: ".claude/shared"}, // exact mode
     },
     OnPermission: func(ctx context.Context, req runner.PermissionRequest) (runner.PermissionDecision, error) {
         // Ask a human, check a policy engine, etc. The turn idle timer is

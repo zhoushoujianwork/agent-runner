@@ -9,65 +9,135 @@ import (
 	"github.com/zhoushoujianwork/agent-runner/runner"
 )
 
-func TestPrepareExtraDirsDefaultTarget(t *testing.T) {
-	source := t.TempDir()
+// contextRoot builds a fake project with .claude and .agent convention dirs.
+func contextRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	for _, path := range []string{
+		".claude/skills/review/SKILL.md",
+		".claude/commands/deploy.md",
+		".agent/agents/planner.md",
+	} {
+		full := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func TestPrepareExtraDirsDiscovery(t *testing.T) {
+	root := contextRoot(t)
 	work := t.TempDir()
-	links, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: source}})
+	links, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: root}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(work, ".claude", filepath.Base(source))
-	if len(links) != 1 || links[0] != want {
-		t.Fatalf("links = %v, want [%s]", links, want)
+	expected := map[string]string{
+		filepath.Join(work, ".claude", "skills", "review"):      filepath.Join(root, ".claude", "skills", "review"),
+		filepath.Join(work, ".claude", "commands", "deploy.md"): filepath.Join(root, ".claude", "commands", "deploy.md"),
+		filepath.Join(work, ".agent", "agents", "planner.md"):   filepath.Join(root, ".agent", "agents", "planner.md"),
 	}
-	dest, err := os.Readlink(want)
-	if err != nil {
-		t.Fatal(err)
+	if len(links) != len(expected) {
+		t.Fatalf("links = %v, want %d entries", links, len(expected))
 	}
-	if dest != source {
-		t.Fatalf("link dest = %q, want %q", dest, source)
+	for target, source := range expected {
+		dest, err := os.Readlink(target)
+		if err != nil {
+			t.Fatalf("missing link %s: %v", target, err)
+		}
+		if dest != source {
+			t.Fatalf("link %s -> %s, want %s", target, dest, source)
+		}
 	}
 	removeLinks(links)
-	if _, err := os.Lstat(want); !os.IsNotExist(err) {
-		t.Fatalf("link not removed: %v", err)
+	for target := range expected {
+		if _, err := os.Lstat(target); !os.IsNotExist(err) {
+			t.Fatalf("link %s not removed: %v", target, err)
+		}
 	}
 }
 
-func TestPrepareExtraDirsExplicitTargetAndAdopt(t *testing.T) {
-	source := t.TempDir()
+func TestPrepareExtraDirsDiscoveryLocalWinsAndAdopts(t *testing.T) {
+	root := contextRoot(t)
 	work := t.TempDir()
-	extras := []runner.ExtraDir{{Source: source, Target: filepath.Join("ctx", "skills")}}
-	links, err := prepareExtraDirs(work, extras)
+	// The workspace already has its own "review" skill: local wins, skipped.
+	local := filepath.Join(work, ".claude", "skills", "review")
+	if err := os.MkdirAll(local, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	links, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: root}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(links) != 1 || links[0] != filepath.Join(work, "ctx", "skills") {
-		t.Fatalf("links = %v", links)
+	if info, err := os.Lstat(local); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("local entry must be untouched: %v %v", info, err)
 	}
-	// A second prepare adopts the identical link without owning it.
-	again, err := prepareExtraDirs(work, extras)
+	for _, link := range links {
+		if link == local {
+			t.Fatal("skipped conflict must not be owned")
+		}
+	}
+	// A second prepare adopts everything already linked: owns nothing new.
+	again, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: root}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(again) != 0 {
-		t.Fatalf("adopted link must not be re-owned: %v", again)
+		t.Fatalf("adopted links must not be re-owned: %v", again)
 	}
 }
 
-func TestPrepareExtraDirsConflict(t *testing.T) {
-	source := t.TempDir()
+func TestPrepareExtraDirsKeep(t *testing.T) {
+	root := contextRoot(t)
 	work := t.TempDir()
-	target := filepath.Join(work, ".claude", "skills")
-	if err := os.MkdirAll(target, 0o755); err != nil {
+	links, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: root, Keep: true}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: source, Target: filepath.Join(".claude", "skills")}})
-	if err == nil || !strings.Contains(err.Error(), "already exists") {
+	if len(links) != 0 {
+		t.Fatalf("Keep links must not be owned for removal: %v", links)
+	}
+	if _, err := os.Lstat(filepath.Join(work, ".claude", "skills", "review")); err != nil {
+		t.Fatalf("Keep link missing: %v", err)
+	}
+}
+
+func TestPrepareExtraDirsDiscoveryNoConventions(t *testing.T) {
+	work := t.TempDir()
+	links, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: t.TempDir()}})
+	if err != nil || len(links) != 0 {
+		t.Fatalf("source without conventions must be a silent no-op: %v %v", links, err)
+	}
+}
+
+func TestPrepareExtraDirsExactMode(t *testing.T) {
+	source := t.TempDir()
+	work := t.TempDir()
+	target := filepath.Join("ctx", "skills")
+	links, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: source, Target: target}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || links[0] != filepath.Join(work, target) {
+		t.Fatalf("links = %v", links)
+	}
+	// Exact mode errors on conflicts instead of skipping.
+	if err := os.Remove(links[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(work, target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: source, Target: target}}); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("expected conflict error, got %v", err)
 	}
 }
 
-func TestPrepareExtraDirsRejectsEscapes(t *testing.T) {
+func TestPrepareExtraDirsRejectsEscapesAndMissing(t *testing.T) {
 	source := t.TempDir()
 	work := t.TempDir()
 	for _, target := range []string{"/abs/path", filepath.Join("..", "outside")} {
@@ -81,17 +151,17 @@ func TestPrepareExtraDirsRejectsEscapes(t *testing.T) {
 }
 
 func TestPrepareExtraDirsRollsBackOnFailure(t *testing.T) {
-	sourceA := t.TempDir()
+	root := contextRoot(t)
 	work := t.TempDir()
-	first := filepath.Join(work, ".claude", filepath.Base(sourceA))
+	first := filepath.Join(work, ".claude", "skills", "review")
 	_, err := prepareExtraDirs(work, []runner.ExtraDir{
-		{Source: sourceA},
-		{Source: filepath.Join(sourceA, "missing")}, // fails after the first link
+		{Source: root},
+		{Source: filepath.Join(root, "missing")}, // fails after the first root linked
 	})
 	if err == nil {
 		t.Fatal("expected failure on second extra dir")
 	}
 	if _, statErr := os.Lstat(first); !os.IsNotExist(statErr) {
-		t.Fatalf("first link must be rolled back: %v", statErr)
+		t.Fatalf("links from the first root must be rolled back: %v", statErr)
 	}
 }
