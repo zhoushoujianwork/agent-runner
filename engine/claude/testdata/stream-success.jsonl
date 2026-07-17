@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"sess-golden"}
+{"type":"stream_event","session_id":"sess-golden","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"par"}}}
+{"type":"assistant","session_id":"sess-golden","message":{"content":[{"type":"text","text":"parsed"},{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"README.md"}}],"usage":{"input_tokens":7,"output_tokens":2}}}
+{"type":"user","session_id":"sess-golden","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok","is_error":false}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"parsed","session_id":"sess-golden","total_cost_usd":0.01,"usage":{"input_tokens":7,"output_tokens":3,"cache_creation_input_tokens":1,"cache_read_input_tokens":2},"modelUsage":{"claude-test":{"costUSD":0.01}}}
