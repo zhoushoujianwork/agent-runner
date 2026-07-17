@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	runner "github.com/zhoushoujianwork/agent-runner"
 	"github.com/zhoushoujianwork/agent-runner/engine/claude"
 	"github.com/zhoushoujianwork/agent-runner/executor/host"
+	runner "github.com/zhoushoujianwork/agent-runner/runner"
 )
 
 var version = "dev"

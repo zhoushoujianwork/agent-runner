@@ -2,16 +2,19 @@ package runner_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
-	runner "github.com/zhoushoujianwork/agent-runner"
 	"github.com/zhoushoujianwork/agent-runner/engine/claude"
 	"github.com/zhoushoujianwork/agent-runner/executor/host"
+	"github.com/zhoushoujianwork/agent-runner/runner"
 )
 
 func sessionRunner(t *testing.T) *runner.Runner {
@@ -116,14 +119,55 @@ func TestSessionBusyAndClosed(t *testing.T) {
 	}
 }
 
-func TestSessionTurnIdleTimeout(t *testing.T) {
+// A stalling turn (agent alive but producing no result) hits the idle timeout,
+// the runner interrupts it, and the session survives for the next turn.
+func TestSessionTurnIdleTimeoutInterruptsWithoutKilling(t *testing.T) {
+	session := openSession(t, runner.SessionRequest{
+		Env:             map[string]string{"FAKE_SESSION_STALL_TURN": "1"},
+		TurnIdleTimeout: 150 * time.Millisecond,
+	})
+	select {
+	case <-session.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("session never became ready")
+	}
+
+	started := time.Now()
+	turn, err := session.Send(context.Background(), runner.TurnInput{Prompt: "stall"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = turn.Wait()
+	var runErr *runner.RunError
+	if !errors.As(err, &runErr) || runErr.Kind != runner.ErrorIdleTimeout {
+		t.Fatalf("expected idle timeout, got %#v", err)
+	}
+	if time.Since(started) > 2*time.Second {
+		t.Fatal("idle timeout took too long")
+	}
+	for range turn.Events() {
+	}
+
+	if !session.Alive() {
+		t.Fatal("an interruptible turn must not kill the session")
+	}
+	next, err := session.Send(context.Background(), runner.TurnInput{Prompt: "still here"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := next.Wait(); err != nil || !result.Success || result.Text != "echo 2: still here" {
+		t.Fatalf("session unusable after interrupted turn: %+v %v", result, err)
+	}
+}
+
+// A hung turn (agent ignores the interrupt frame) escalates to killing the
+// process after CloseGrace.
+func TestSessionTurnHangEscalatesToKill(t *testing.T) {
 	session := openSession(t, runner.SessionRequest{
 		Env:             map[string]string{"FAKE_SESSION_HANG_TURN": "2"},
 		TurnIdleTimeout: 150 * time.Millisecond,
+		CloseGrace:      100 * time.Millisecond,
 	})
-	// The idle clock only measures output gaps, but a cold process may need
-	// longer than one idle window just to start — wait for init like real
-	// callers (prewarm) do before sending the first turn.
 	select {
 	case <-session.Ready():
 	case <-time.After(5 * time.Second):
@@ -137,8 +181,7 @@ func TestSessionTurnIdleTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	started := time.Now()
-	turn, err = session.Send(context.Background(), runner.TurnInput{Prompt: "stall"})
+	turn, err = session.Send(context.Background(), runner.TurnInput{Prompt: "hang"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,13 +190,10 @@ func TestSessionTurnIdleTimeout(t *testing.T) {
 	if !errors.As(err, &runErr) || runErr.Kind != runner.ErrorIdleTimeout {
 		t.Fatalf("expected idle timeout, got %#v", err)
 	}
-	if time.Since(started) > 2*time.Second {
-		t.Fatal("idle timeout took too long")
-	}
 	select {
 	case <-session.Dead():
 	case <-time.After(5 * time.Second):
-		t.Fatal("idle timeout must retire the session process")
+		t.Fatal("an unanswered interrupt must retire the session process")
 	}
 	for range turn.Events() {
 	}
@@ -199,12 +239,14 @@ func TestSessionCrashMidTurn(t *testing.T) {
 	}
 }
 
-func TestSessionTurnCtxCancel(t *testing.T) {
+// Cancelling a turn's context interrupts the turn but keeps the session
+// usable when the agent honours the interrupt.
+func TestSessionTurnCtxCancelKeepsSessionAlive(t *testing.T) {
 	session := openSession(t, runner.SessionRequest{
-		Env: map[string]string{"FAKE_SESSION_HANG_TURN": "1"},
+		Env: map[string]string{"FAKE_SESSION_STALL_TURN": "1"},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	turn, err := session.Send(ctx, runner.TurnInput{Prompt: "hang"})
+	turn, err := session.Send(ctx, runner.TurnInput{Prompt: "stall"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,10 +259,15 @@ func TestSessionTurnCtxCancel(t *testing.T) {
 	if !errors.As(err, &runErr) || runErr.Kind != runner.ErrorCancelled {
 		t.Fatalf("expected cancelled, got %#v", err)
 	}
-	select {
-	case <-session.Dead():
-	case <-time.After(5 * time.Second):
-		t.Fatal("cancelling a turn must retire the session process")
+	if !session.Alive() {
+		t.Fatal("a cancelled turn must not kill an interruptible session")
+	}
+	next, err := session.Send(context.Background(), runner.TurnInput{Prompt: "next"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := next.Wait(); err != nil || !result.Success {
+		t.Fatalf("session unusable after cancelled turn: %+v %v", result, err)
 	}
 }
 
@@ -248,6 +295,74 @@ func TestSessionMaxTurnsSubtype(t *testing.T) {
 	}
 	if result, err := turn.Wait(); err != nil || !result.Success {
 		t.Fatalf("session unusable after max-turns turn: %+v %v", result, err)
+	}
+}
+
+func TestSessionPermissionAllow(t *testing.T) {
+	var prompts atomic.Int32
+	session := openSession(t, runner.SessionRequest{
+		Env:             map[string]string{"FAKE_SESSION_PERMISSION_TURN": "1"},
+		TurnIdleTimeout: 500 * time.Millisecond,
+		OnPermission: func(ctx context.Context, req runner.PermissionRequest) (runner.PermissionDecision, error) {
+			prompts.Add(1)
+			if req.ToolName != "Bash" {
+				t.Errorf("unexpected tool: %+v", req)
+			}
+			var input struct {
+				Command string `json:"command"`
+			}
+			if err := json.Unmarshal(req.Input, &input); err != nil || input.Command != "ls" {
+				t.Errorf("unexpected input: %s", req.Input)
+			}
+			// Outlive the idle window to prove the idle timer pauses while a
+			// permission prompt is pending.
+			time.Sleep(time.Second)
+			return runner.PermissionDecision{Allow: true}, nil
+		},
+	})
+	turn, err := session.Send(context.Background(), runner.TurnInput{Prompt: "use the tool"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := turn.Wait()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success || result.Text != "tool approved" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if prompts.Load() != 1 {
+		t.Fatalf("permission callback fired %d times", prompts.Load())
+	}
+}
+
+func TestSessionPermissionDeny(t *testing.T) {
+	session := openSession(t, runner.SessionRequest{
+		Env: map[string]string{"FAKE_SESSION_PERMISSION_TURN": "1"},
+		OnPermission: func(ctx context.Context, req runner.PermissionRequest) (runner.PermissionDecision, error) {
+			return runner.PermissionDecision{Message: "nope denied"}, nil
+		},
+	})
+	turn, err := session.Send(context.Background(), runner.TurnInput{Prompt: "use the tool"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := turn.Wait()
+	if err == nil || result.Success {
+		t.Fatalf("denied tool use should fail the turn: %+v", result)
+	}
+	if !strings.Contains(err.Error(), "nope denied") {
+		t.Fatalf("deny message not surfaced: %v", err)
+	}
+	if !session.Alive() {
+		t.Fatal("a denied permission must not kill the session")
+	}
+	next, err := session.Send(context.Background(), runner.TurnInput{Prompt: "carry on"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := next.Wait(); err != nil || !result.Success || result.Text != "echo 2: carry on" {
+		t.Fatalf("session unusable after denied turn: %+v %v", result, err)
 	}
 }
 

@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	runner "github.com/zhoushoujianwork/agent-runner"
 	"github.com/zhoushoujianwork/agent-runner/engine/claude"
 	"github.com/zhoushoujianwork/agent-runner/executor/host"
+	runner "github.com/zhoushoujianwork/agent-runner/runner"
 )
 
 func TestRunnerSuccess(t *testing.T) {
@@ -148,7 +148,7 @@ func buildFakeClaude(t *testing.T) string {
 		name += ".exe"
 	}
 	path := filepath.Join(t.TempDir(), name)
-	cmd := exec.Command("go", "build", "-o", path, "./testdata/fakeclaude")
+	cmd := exec.Command("go", "build", "-o", path, "../internal/fakeclaude")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build fake claude: %v\n%s", err, output)
 	}

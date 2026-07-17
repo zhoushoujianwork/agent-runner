@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	runner "github.com/zhoushoujianwork/agent-runner"
+	runner "github.com/zhoushoujianwork/agent-runner/runner"
 )
 
 func TestReadRequest(t *testing.T) {

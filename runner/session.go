@@ -16,19 +16,22 @@ const (
 )
 
 // OpenSession starts one persistent agent process that accepts many turns via
-// Session.Send. The Engine must implement SessionEngine and the Executor must
-// produce processes with a writable stdin (StdinWriter). Cancelling ctx kills
-// the process; per-turn deadlines belong to Send.
+// Session.Send. The Executor must produce processes with a writable stdin
+// (StdinWriter). Cancelling ctx kills the process; per-turn deadlines belong
+// to Send.
 func (r *Runner) OpenSession(ctx context.Context, req SessionRequest) (*Session, error) {
+	return r.openSession(ctx, req, false)
+}
+
+// openSession is the shared constructor. killOnFail marks single-turn
+// sessions (Runner.Run): the process is retired immediately when its only
+// turn fails, instead of attempting a graceful interrupt.
+func (r *Runner) openSession(ctx context.Context, req SessionRequest, killOnFail bool) (*Session, error) {
 	if ctx == nil {
 		return nil, &RunError{Kind: ErrorInvalidRequest, Op: "open session", Err: errors.New("nil context")}
 	}
 	if r == nil || r.Engine == nil || r.Executor == nil {
 		return nil, &RunError{Kind: ErrorInvalidRequest, Op: "open session", Err: errors.New("engine and executor are required")}
-	}
-	engine, ok := r.Engine.(SessionEngine)
-	if !ok {
-		return nil, &RunError{Kind: ErrorInvalidRequest, Op: "open session", Err: fmt.Errorf("engine %T does not support sessions", r.Engine)}
 	}
 	if req.MaxFrameBytes <= 0 {
 		req.MaxFrameBytes = defaultMaxFrameBytes
@@ -40,7 +43,7 @@ func (r *Runner) OpenSession(ctx context.Context, req SessionRequest) (*Session,
 		req.CloseGrace = defaultCloseGrace
 	}
 
-	protocol, err := engine.NewSession(req)
+	protocol, err := r.Engine.NewSession(req)
 	if err != nil {
 		return nil, err
 	}
@@ -68,6 +71,7 @@ func (r *Runner) OpenSession(ctx context.Context, req SessionRequest) (*Session,
 		process:    process,
 		stdin:      writer.StdinWriter(),
 		cancel:     cancel,
+		killOnFail: killOnFail,
 		stderrTail: newTailBuffer(req.MaxStderrBytes),
 		readyCh:    make(chan struct{}),
 		deadCh:     make(chan struct{}),
@@ -79,11 +83,12 @@ func (r *Runner) OpenSession(ctx context.Context, req SessionRequest) (*Session,
 // Session is one live persistent agent process. Turns are strictly serial:
 // Send fails with ErrorBusy while a previous turn is in flight.
 type Session struct {
-	req      SessionRequest
-	protocol SessionProtocol
-	process  Process
-	stdin    io.WriteCloser
-	cancel   context.CancelFunc
+	req        SessionRequest
+	protocol   SessionProtocol
+	process    Process
+	stdin      io.WriteCloser
+	cancel     context.CancelFunc
+	killOnFail bool
 
 	stderrTail *tailBuffer
 
@@ -91,6 +96,11 @@ type Session struct {
 	readyOnce sync.Once
 	deadCh    chan struct{}
 	closeOnce sync.Once
+
+	// writeMu serializes stdin writes: turn payloads (Send), protocol replies
+	// (readLoop), interrupt frames and permission responses (watcher and
+	// permission goroutines).
+	writeMu sync.Mutex
 
 	mu      sync.Mutex
 	turn    *TurnHandle
@@ -140,8 +150,9 @@ func (s *Session) Exit() (ExitStatus, error) {
 
 // Send writes one user turn into the live process and returns its handle.
 // Turns are serial: a Send while a turn is in flight fails with ErrorBusy.
-// Cancelling ctx or hitting the turn idle timeout kills the whole session —
-// a single turn cannot be interrupted without losing the process.
+// Cancelling ctx or hitting the turn idle timeout interrupts the turn; the
+// session survives when the agent honours the interrupt within CloseGrace,
+// and is killed otherwise.
 func (s *Session) Send(ctx context.Context, input TurnInput) (*TurnHandle, error) {
 	if ctx == nil {
 		return nil, &RunError{Kind: ErrorInvalidRequest, Op: "session send", Err: errors.New("nil context")}
@@ -178,7 +189,7 @@ func (s *Session) Send(ctx context.Context, input TurnInput) (*TurnHandle, error
 		s.mu.Unlock()
 		return nil, &RunError{Kind: ErrorBusy, Op: "session send", Err: errors.New("a previous turn is still in flight")}
 	}
-	turn := newTurnHandle()
+	turn := newTurnHandle(ctx)
 	// Flush events parsed while no turn was mounted (process init, late frames)
 	// ahead of this turn's live events. Safe: the reader cannot touch turn's
 	// channel until s.turn is published below.
@@ -189,7 +200,7 @@ func (s *Session) Send(ctx context.Context, input TurnInput) (*TurnHandle, error
 	s.turn = turn
 	s.mu.Unlock()
 
-	if _, err := s.stdin.Write(payload); err != nil {
+	if err := s.writeStdin(payload); err != nil {
 		failure := &RunError{
 			Kind:   ErrorProcess,
 			Op:     "session send",
@@ -202,11 +213,11 @@ func (s *Session) Send(ctx context.Context, input TurnInput) (*TurnHandle, error
 
 	if idleTimeout > 0 {
 		turn.setIdleTimer(idleTimeout, func() {
-			s.failTurn(turn, &RunError{
+			s.interruptTurn(turn, &RunError{
 				Kind: ErrorIdleTimeout,
 				Op:   "session turn",
 				Err:  fmt.Errorf("no process output for %s", idleTimeout),
-			}, true)
+			})
 		})
 	}
 	turn.setCtxWatch(context.AfterFunc(ctx, func() {
@@ -214,7 +225,7 @@ func (s *Session) Send(ctx context.Context, input TurnInput) (*TurnHandle, error
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			kind = ErrorTimeout
 		}
-		s.failTurn(turn, &RunError{Kind: kind, Op: "session turn", Err: ctx.Err()}, true)
+		s.interruptTurn(turn, &RunError{Kind: kind, Op: "session turn", Err: ctx.Err()})
 	}))
 	return turn, nil
 }
@@ -223,6 +234,14 @@ func (s *Session) protocolEncode(input TurnInput) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.protocol.EncodeTurn(input)
+}
+
+// writeStdin serializes writes into the live process stdin.
+func (s *Session) writeStdin(payload []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err := s.stdin.Write(payload)
+	return err
 }
 
 // Close retires the session: close stdin so the agent process can finish
@@ -244,6 +263,38 @@ func (s *Session) Close() error {
 		s.cancel()
 	})
 	return nil
+}
+
+// interruptTurn asks the agent to abort the in-flight turn without losing the
+// process: it marks the turn with its failure cause, writes the protocol's
+// interrupt frame, and escalates to killing the process if the turn does not
+// end within CloseGrace. Sessions opened for a single turn (killOnFail) and
+// engines without interrupt support skip straight to the kill.
+func (s *Session) interruptTurn(turn *TurnHandle, cause error) {
+	if s.killOnFail {
+		s.failTurn(turn, cause, true)
+		return
+	}
+	s.mu.Lock()
+	if s.turn != turn || s.dead || s.dying || turn.interruptCause != nil {
+		s.mu.Unlock()
+		return
+	}
+	turn.interruptCause = cause
+	payload, err := s.protocol.EncodeInterrupt()
+	s.mu.Unlock()
+
+	if err != nil || len(payload) == 0 {
+		s.failTurn(turn, cause, true)
+		return
+	}
+	if err := s.writeStdin(payload); err != nil {
+		s.failTurn(turn, cause, true)
+		return
+	}
+	turn.setEscalation(time.AfterFunc(s.req.CloseGrace, func() {
+		s.failTurn(turn, cause, true)
+	}))
 }
 
 // failTurn detaches the in-flight turn (if it is still the current one),
@@ -305,7 +356,7 @@ func (s *Session) readLoop() {
 				s.dispatch([]Event{{Type: EventDiagnostic, Text: line}})
 				continue
 			}
-			events, endOfTurn, err := s.parseLine(item.line)
+			step, err := s.parseLine(item.line)
 			if err != nil {
 				if terminalErr == nil {
 					terminalErr = &RunError{Kind: ErrorProtocol, Op: "parse session stdout", Err: err}
@@ -313,8 +364,17 @@ func (s *Session) readLoop() {
 				}
 				continue
 			}
-			s.dispatch(events)
-			if endOfTurn {
+			if len(step.Reply) > 0 {
+				if err := s.writeStdin(step.Reply); err != nil && terminalErr == nil && s.Alive() {
+					terminalErr = &RunError{Kind: ErrorProtocol, Op: "write protocol reply", Err: err}
+					_ = s.process.Cancel()
+				}
+			}
+			if step.Control != nil {
+				go s.answerControl(step.Control)
+			}
+			s.dispatch(step.Events)
+			if step.EndOfTurn {
 				s.completeTurn()
 			}
 
@@ -329,17 +389,62 @@ func (s *Session) readLoop() {
 	s.finalizeDeath(status, terminalErr)
 }
 
-func (s *Session) parseLine(line []byte) ([]Event, bool, error) {
+func (s *Session) parseLine(line []byte) (Step, error) {
 	s.mu.Lock()
-	events, endOfTurn, err := s.protocol.ParseLine(line)
+	step, err := s.protocol.ParseLine(line)
 	s.mu.Unlock()
-	for _, event := range events {
+	for _, event := range step.Events {
 		if event.Type == EventInit {
 			s.readyOnce.Do(func() { close(s.readyCh) })
 			break
 		}
 	}
-	return events, endOfTurn, err
+	return step, err
+}
+
+// answerControl resolves one provider permission prompt off the reader
+// goroutine: the callback may block on human input, so the turn idle timer is
+// paused while the prompt is pending. A nil OnPermission denies.
+func (s *Session) answerControl(ctrl *ControlRequest) {
+	s.mu.Lock()
+	turn := s.turn
+	s.mu.Unlock()
+	if turn != nil {
+		turn.pauseIdle()
+		defer turn.resumeIdle()
+	}
+	ctx := context.Background()
+	if turn != nil && turn.ctx != nil {
+		ctx = turn.ctx
+	}
+
+	decision := PermissionDecision{Message: "no permission handler configured"}
+	if s.req.OnPermission != nil {
+		var err error
+		decision, err = s.req.OnPermission(ctx, PermissionRequest{
+			ToolName: ctrl.ToolName,
+			Input:    ctrl.Input,
+			Raw:      ctrl.Raw,
+		})
+		if err != nil {
+			decision = PermissionDecision{Message: err.Error()}
+		}
+	}
+
+	s.mu.Lock()
+	payload, err := s.protocol.EncodePermissionResponse(ctrl.ID, decision)
+	s.mu.Unlock()
+	if err == nil {
+		err = s.writeStdin(payload)
+	}
+	if err != nil && s.Alive() {
+		failure := &RunError{Kind: ErrorProtocol, Op: "session permission response", Err: err}
+		if turn != nil {
+			s.failTurn(turn, failure, true)
+		} else {
+			_ = s.process.Cancel()
+		}
+	}
 }
 
 // dispatch delivers events to the in-flight turn, or buffers a bounded number
@@ -382,6 +487,12 @@ func (s *Session) completeTurn() {
 	var err error
 	if turn != nil {
 		result, err = s.protocol.TurnResult(time.Since(turn.started))
+		if turn.interruptCause != nil {
+			// The turn ended because we interrupted it; the cause outranks the
+			// provider's own error result.
+			err = turn.interruptCause
+			result.Success = false
+		}
 	}
 	s.mu.Unlock()
 	if turn == nil {
@@ -406,15 +517,22 @@ func (s *Session) finalizeDeath(status ExitStatus, terminalErr error) {
 	s.exit = status
 	closed := s.closed
 	sessionID := s.protocol.SessionID()
+	var interruptCause error
+	if turn != nil {
+		interruptCause = turn.interruptCause
+	}
 	s.mu.Unlock()
 
 	if turn != nil {
 		turn.stopWatchers()
 		err := terminalErr
 		if err == nil {
-			if closed {
+			switch {
+			case interruptCause != nil:
+				err = interruptCause
+			case closed:
 				err = &RunError{Kind: ErrorClosed, Op: "session turn", Err: errors.New("session closed before the turn completed")}
-			} else {
+			default:
 				err = &RunError{
 					Kind:     ErrorProcess,
 					Op:       "session turn",
@@ -424,12 +542,14 @@ func (s *Session) finalizeDeath(status ExitStatus, terminalErr error) {
 				}
 			}
 		}
-		turn.complete(Result{
+		result := Result{
 			Success:   false,
 			SessionID: sessionID,
 			ExitCode:  status.ExitCode,
 			Signal:    status.Signal,
-		}, err)
+		}
+		turn.eventsIn <- Event{Type: EventResult, Time: time.Now().UTC(), SessionID: sessionID, Result: &result}
+		turn.complete(result, err)
 		close(turn.eventsIn)
 	}
 	for _, zombie := range zombies {
@@ -447,7 +567,7 @@ func (s *Session) finalizeDeath(status ExitStatus, terminalErr error) {
 }
 
 // deathError classifies an unprompted process exit. A clean exit after Close
-// is not an error. Callers must hold no assumption about s.mu; it is held.
+// is not an error.
 func (s *Session) deathError(status ExitStatus, closed bool) error {
 	if closed || status.ExitCode == 0 {
 		return nil
@@ -482,10 +602,16 @@ type TurnHandle struct {
 	eventsIn chan Event
 	done     chan struct{}
 	started  time.Time
+	ctx      context.Context // the Send context; passed to permission callbacks
+
+	// interruptCause is the failure cause recorded when the runner interrupts
+	// this turn; guarded by the owning session's mu.
+	interruptCause error
 
 	watchMu         sync.Mutex
 	idleTimer       *time.Timer
 	idleTimeout     time.Duration
+	escalation      *time.Timer
 	stopCtxWatch    func() bool
 	watchersStopped bool
 
@@ -495,7 +621,7 @@ type TurnHandle struct {
 	err          error
 }
 
-func newTurnHandle() *TurnHandle {
+func newTurnHandle(ctx context.Context) *TurnHandle {
 	eventsIn := make(chan Event, 64+maxPendingSessionEvents)
 	eventsOut := make(chan Event)
 	turn := &TurnHandle{
@@ -503,14 +629,15 @@ func newTurnHandle() *TurnHandle {
 		eventsIn: eventsIn,
 		done:     make(chan struct{}),
 		started:  time.Now(),
+		ctx:      ctx,
 	}
 	go pumpEvents(eventsIn, eventsOut)
 	return turn
 }
 
 // Events streams this turn's events. The channel closes shortly after the
-// turn completes (immediately on a normal turn end; after the process dies on
-// failure paths, since a failed turn always retires the whole session).
+// turn completes (immediately on a normal or interrupted turn end; after the
+// process dies when the turn failure retired the whole session).
 func (t *TurnHandle) Events() <-chan Event { return t.events }
 
 // Wait blocks until the turn completes and returns its terminal aggregate.
@@ -562,9 +689,40 @@ func (t *TurnHandle) setCtxWatch(stop func() bool) {
 	t.watchMu.Unlock()
 }
 
+// setEscalation arms the interrupt-escalation timer; a turn that completed in
+// the meantime stops it immediately.
+func (t *TurnHandle) setEscalation(timer *time.Timer) {
+	t.watchMu.Lock()
+	if t.watchersStopped {
+		t.watchMu.Unlock()
+		timer.Stop()
+		return
+	}
+	t.escalation = timer
+	t.watchMu.Unlock()
+}
+
 func (t *TurnHandle) resetIdle() {
 	t.watchMu.Lock()
 	if t.idleTimer != nil {
+		t.idleTimer.Reset(t.idleTimeout)
+	}
+	t.watchMu.Unlock()
+}
+
+// pauseIdle suspends the idle timer while a permission prompt is pending;
+// resumeIdle restarts the full idle window.
+func (t *TurnHandle) pauseIdle() {
+	t.watchMu.Lock()
+	if t.idleTimer != nil {
+		t.idleTimer.Stop()
+	}
+	t.watchMu.Unlock()
+}
+
+func (t *TurnHandle) resumeIdle() {
+	t.watchMu.Lock()
+	if t.idleTimer != nil && !t.watchersStopped {
 		t.idleTimer.Reset(t.idleTimeout)
 	}
 	t.watchMu.Unlock()
@@ -576,6 +734,10 @@ func (t *TurnHandle) stopWatchers() {
 	if t.idleTimer != nil {
 		t.idleTimer.Stop()
 		t.idleTimer = nil
+	}
+	if t.escalation != nil {
+		t.escalation.Stop()
+		t.escalation = nil
 	}
 	stop := t.stopCtxWatch
 	t.stopCtxWatch = nil

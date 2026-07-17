@@ -1,14 +1,11 @@
 package claude
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
-	runner "github.com/zhoushoujianwork/agent-runner"
+	"github.com/zhoushoujianwork/agent-runner/runner"
 )
 
 type Engine struct {
@@ -22,12 +19,14 @@ func New(binary string) *Engine {
 	return &Engine{Binary: binary}
 }
 
-func (e *Engine) NewRun(req runner.Request) (runner.ProtocolRun, error) {
-	if strings.TrimSpace(req.Prompt) == "" {
-		return nil, &runner.RunError{Kind: runner.ErrorInvalidRequest, Op: "claude build", Err: errors.New("prompt is required")}
-	}
+// NewSession builds one persistent claude process in realtime streaming-input
+// mode. `--print --input-format stream-json` keeps the process alive across
+// turns — each Session.Send writes one stream-json user frame to stdin and the
+// turn ends at that turn's `result` frame. One-shot runs use the same protocol
+// and simply close stdin after the first turn.
+func (e *Engine) NewSession(req runner.SessionRequest) (runner.SessionProtocol, error) {
 	conversationModes := 0
-	if req.SessionID != "" {
+	if req.ResumeSessionID != "" {
 		conversationModes++
 	}
 	if req.NewSessionID != "" {
@@ -37,12 +36,13 @@ func (e *Engine) NewRun(req runner.Request) (runner.ProtocolRun, error) {
 		conversationModes++
 	}
 	if conversationModes > 1 {
-		return nil, &runner.RunError{Kind: runner.ErrorInvalidRequest, Op: "claude build", Err: errors.New("session_id, new_session_id, and continue are mutually exclusive")}
+		return nil, &runner.RunError{Kind: runner.ErrorInvalidRequest, Op: "claude session build", Err: errors.New("resume_session_id, new_session_id, and continue are mutually exclusive")}
 	}
 
 	args := []string{
 		e.Binary,
 		"--print",
+		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--include-partial-messages",
@@ -53,8 +53,8 @@ func (e *Engine) NewRun(req runner.Request) (runner.ProtocolRun, error) {
 	if req.MaxTurns > 0 {
 		args = append(args, "--max-turns", fmt.Sprintf("%d", req.MaxTurns))
 	}
-	if req.SessionID != "" {
-		args = append(args, "--resume", req.SessionID)
+	if req.ResumeSessionID != "" {
+		args = append(args, "--resume", req.ResumeSessionID)
 	} else if req.NewSessionID != "" {
 		args = append(args, "--session-id", req.NewSessionID)
 	} else if req.Continue {
@@ -72,300 +72,45 @@ func (e *Engine) NewRun(req runner.Request) (runner.ProtocolRun, error) {
 	if req.MCPConfig != "" {
 		args = append(args, "--mcp-config", req.MCPConfig)
 	}
+	if req.OnPermission != nil {
+		args = append(args, "--permission-prompt-tool", "stdio")
+	}
 	permission, err := permissionArgs(req.Permission)
 	if err != nil {
-		return nil, &runner.RunError{Kind: runner.ErrorInvalidRequest, Op: "claude build", Err: err}
+		return nil, &runner.RunError{Kind: runner.ErrorInvalidRequest, Op: "claude session build", Err: err}
 	}
 	args = append(args, permission...)
 	args = append(args, req.ExtraArgs...)
 
-	stdin := append([]byte(req.Prompt), '\n')
-	return &protocolRun{
+	return &sessionProtocol{
 		command: runner.CommandSpec{
-			Argv:  args,
-			Dir:   req.WorkDir,
-			Env:   cloneMap(req.Env),
-			Stdin: stdin,
+			Argv:        args,
+			Dir:         req.WorkDir,
+			Env:         cloneMap(req.Env),
+			Interactive: true,
 		},
 	}, nil
 }
 
-type protocolRun struct {
-	command       runner.CommandSpec
-	sessionID     string
-	finalText     string
-	usage         runner.Usage
-	fallbackUsage runner.Usage
-	resultSeen    bool
-	resultIsError bool
-	resultError   string
-	resultSubtype string
-}
-
-func (p *protocolRun) Command() runner.CommandSpec { return p.command }
-
-type envelope struct {
-	Type       string                     `json:"type"`
-	Subtype    string                     `json:"subtype"`
-	SessionID  string                     `json:"session_id"`
-	Result     string                     `json:"result"`
-	IsError    bool                       `json:"is_error"`
-	Error      string                     `json:"error"`
-	Usage      json.RawMessage            `json:"usage"`
-	CostUSD    float64                    `json:"cost_usd"`
-	TotalCost  float64                    `json:"total_cost_usd"`
-	ModelUsage map[string]json.RawMessage `json:"modelUsage"`
-	Message    *message                   `json:"message"`
-	Event      json.RawMessage            `json:"event"`
-}
-
-type message struct {
-	Content []contentBlock  `json:"content"`
-	Usage   json.RawMessage `json:"usage"`
-}
-
-type contentBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text"`
-	Thinking  string          `json:"thinking"`
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Input     json.RawMessage `json:"input"`
-	Content   json.RawMessage `json:"content"`
-	ToolUseID string          `json:"tool_use_id"`
-	IsError   bool            `json:"is_error"`
-}
-
-func (p *protocolRun) ParseLine(line []byte) ([]runner.Event, error) {
-	line = bytes.TrimSpace(line)
-	if len(line) == 0 {
+func permissionArgs(mode runner.PermissionMode) ([]string, error) {
+	switch mode {
+	case "", runner.PermissionDefault:
 		return nil, nil
-	}
-	var frame envelope
-	if err := json.Unmarshal(line, &frame); err != nil {
-		return nil, fmt.Errorf("decode claude stream-json: %w", err)
-	}
-	if frame.Type == "" {
-		return nil, errors.New("decode claude stream-json: missing type")
-	}
-	if frame.SessionID != "" {
-		p.sessionID = frame.SessionID
-	}
-	raw := append(json.RawMessage(nil), line...)
-	var events []runner.Event
-
-	switch frame.Type {
-	case "system":
-		events = append(events, runner.Event{Type: runner.EventInit, Raw: raw})
-
-	case "assistant":
-		if frame.Message == nil {
-			events = append(events, runner.Event{Type: runner.EventRaw, Raw: raw})
-			break
-		}
-		addUsage(&p.fallbackUsage, parseUsage(frame.Message.Usage))
-		for _, block := range frame.Message.Content {
-			events = append(events, contentEvents(block, raw)...)
-		}
-		if len(events) == 0 {
-			events = append(events, runner.Event{Type: runner.EventRaw, Raw: raw})
-		}
-
-	case "user":
-		if frame.Message == nil {
-			events = append(events, runner.Event{Type: runner.EventRaw, Raw: raw})
-			break
-		}
-		for _, block := range frame.Message.Content {
-			if block.Type == "tool_result" {
-				events = append(events, runner.Event{
-					Type: runner.EventToolResult,
-					Tool: &runner.ToolEvent{
-						ToolUseID: block.ToolUseID,
-						Content:   cloneRaw(block.Content),
-						IsError:   block.IsError,
-					},
-					Raw: raw,
-				})
-			}
-		}
-		if len(events) == 0 {
-			events = append(events, runner.Event{Type: runner.EventRaw, Raw: raw})
-		}
-
-	case "stream_event":
-		events = append(events, parseStreamEvent(frame.Event, raw)...)
-		if len(events) == 0 {
-			events = append(events, runner.Event{Type: runner.EventRaw, Raw: raw})
-		}
-
-	case "result":
-		p.resultSeen = true
-		p.resultIsError = frame.IsError
-		p.finalText = frame.Result
-		p.resultError = frame.Error
-		p.resultSubtype = frame.Subtype
-		p.usage = parseUsage(frame.Usage)
-		if frame.TotalCost != 0 {
-			p.usage.CostUSD = frame.TotalCost
-		} else if frame.CostUSD != 0 {
-			p.usage.CostUSD = frame.CostUSD
-		}
-		p.usage.ModelUsage = parseModelUsage(frame.ModelUsage)
-		usage := p.usage
-		events = append(events, runner.Event{Type: runner.EventUsage, Usage: &usage, Raw: raw})
-
+	case runner.PermissionAcceptEdits:
+		return []string{"--permission-mode", "acceptEdits"}, nil
+	case runner.PermissionAuto:
+		return []string{"--permission-mode", "auto"}, nil
+	case runner.PermissionBypass:
+		return []string{"--permission-mode", "bypassPermissions"}, nil
+	case runner.PermissionManual:
+		return []string{"--permission-mode", "manual"}, nil
+	case runner.PermissionDontAsk:
+		return []string{"--permission-mode", "dontAsk"}, nil
+	case runner.PermissionPlan:
+		return []string{"--permission-mode", "plan"}, nil
 	default:
-		events = append(events, runner.Event{Type: runner.EventRaw, Raw: raw})
+		return nil, fmt.Errorf("unsupported permission mode %q", mode)
 	}
-
-	for i := range events {
-		events[i].SessionID = p.sessionID
-	}
-	return events, nil
-}
-
-func contentEvents(block contentBlock, raw json.RawMessage) []runner.Event {
-	switch block.Type {
-	case "text":
-		return []runner.Event{{Type: runner.EventText, Text: block.Text, Raw: raw}}
-	case "thinking":
-		return []runner.Event{{Type: runner.EventThinking, Text: block.Thinking, Raw: raw}}
-	case "tool_use":
-		return []runner.Event{{
-			Type: runner.EventToolUse,
-			Tool: &runner.ToolEvent{ID: block.ID, Name: block.Name, Input: cloneRaw(block.Input)},
-			Raw:  raw,
-		}}
-	case "tool_result":
-		return []runner.Event{{
-			Type: runner.EventToolResult,
-			Tool: &runner.ToolEvent{ToolUseID: block.ToolUseID, Content: cloneRaw(block.Content), IsError: block.IsError},
-			Raw:  raw,
-		}}
-	default:
-		return nil
-	}
-}
-
-func parseStreamEvent(data, raw json.RawMessage) []runner.Event {
-	if len(data) == 0 {
-		return nil
-	}
-	var event struct {
-		Type         string       `json:"type"`
-		Delta        streamDelta  `json:"delta"`
-		ContentBlock contentBlock `json:"content_block"`
-	}
-	if json.Unmarshal(data, &event) != nil {
-		return nil
-	}
-	switch event.Type {
-	case "content_block_delta":
-		switch event.Delta.Type {
-		case "text_delta":
-			return []runner.Event{{Type: runner.EventTextDelta, Text: event.Delta.Text, Raw: raw}}
-		case "thinking_delta":
-			return []runner.Event{{Type: runner.EventThinking, Text: event.Delta.Thinking, Raw: raw}}
-		}
-	case "content_block_start":
-		return contentEvents(event.ContentBlock, raw)
-	}
-	return nil
-}
-
-type streamDelta struct {
-	Type     string `json:"type"`
-	Text     string `json:"text"`
-	Thinking string `json:"thinking"`
-}
-
-func (p *protocolRun) Finalize(status runner.ExitStatus, stderr string, duration time.Duration) (runner.Result, error) {
-	usage := p.usage
-	if !p.resultSeen {
-		usage = p.fallbackUsage
-	}
-	result := runner.Result{
-		Success:    status.ExitCode == 0 && p.resultSeen && !p.resultIsError,
-		Text:       p.finalText,
-		SessionID:  p.sessionID,
-		Subtype:    p.resultSubtype,
-		ExitCode:   status.ExitCode,
-		Signal:     status.Signal,
-		DurationMS: duration.Milliseconds(),
-		Usage:      usage,
-	}
-	if status.ExitCode != 0 {
-		return result, &runner.RunError{
-			Kind:     runner.ErrorProcess,
-			Op:       "claude",
-			ExitCode: status.ExitCode,
-			Stderr:   stderr,
-			Err:      errors.New(strings.TrimSpace(stderr)),
-		}
-	}
-	if !p.resultSeen {
-		return result, &runner.RunError{Kind: runner.ErrorProtocol, Op: "claude", Err: errors.New("stream ended without result event")}
-	}
-	if p.resultIsError {
-		message := p.resultError
-		if message == "" {
-			message = p.finalText
-		}
-		return result, &runner.RunError{Kind: runner.ErrorProcess, Op: "claude result", Err: errors.New(message)}
-	}
-	return result, nil
-}
-
-func parseUsage(raw json.RawMessage) runner.Usage {
-	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return runner.Usage{}
-	}
-	var value struct {
-		InputTokens              int64 `json:"input_tokens"`
-		OutputTokens             int64 `json:"output_tokens"`
-		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-	}
-	_ = json.Unmarshal(raw, &value)
-	return runner.Usage{
-		InputTokens:              value.InputTokens,
-		OutputTokens:             value.OutputTokens,
-		CacheCreationInputTokens: value.CacheCreationInputTokens,
-		CacheReadInputTokens:     value.CacheReadInputTokens,
-	}
-}
-
-func parseModelUsage(raw map[string]json.RawMessage) map[string]float64 {
-	if len(raw) == 0 {
-		return nil
-	}
-	result := make(map[string]float64, len(raw))
-	for model, data := range raw {
-		var value struct {
-			CostUSD      float64 `json:"costUSD"`
-			CostUSDSnake float64 `json:"cost_usd"`
-		}
-		if json.Unmarshal(data, &value) == nil {
-			if value.CostUSD != 0 {
-				result[model] = value.CostUSD
-			} else {
-				result[model] = value.CostUSDSnake
-			}
-		}
-	}
-	return result
-}
-
-func addUsage(target *runner.Usage, value runner.Usage) {
-	target.InputTokens += value.InputTokens
-	target.OutputTokens += value.OutputTokens
-	target.CacheCreationInputTokens += value.CacheCreationInputTokens
-	target.CacheReadInputTokens += value.CacheReadInputTokens
-}
-
-func cloneRaw(value json.RawMessage) json.RawMessage {
-	return append(json.RawMessage(nil), value...)
 }
 
 func cloneMap(value map[string]string) map[string]string {

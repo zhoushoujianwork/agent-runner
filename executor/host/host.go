@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	runner "github.com/zhoushoujianwork/agent-runner"
+	runner "github.com/zhoushoujianwork/agent-runner/runner"
 )
 
 const defaultTerminationGrace = 2 * time.Second

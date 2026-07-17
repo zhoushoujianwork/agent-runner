@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,9 @@ type Request struct {
 	IdleTimeout        time.Duration     `json:"-"`
 	MaxFrameBytes      int               `json:"max_frame_bytes,omitempty"`
 	MaxStderrBytes     int               `json:"max_stderr_bytes,omitempty"`
+	// OnPermission answers provider permission prompts (tool approvals). Nil
+	// denies every prompt; providers only emit prompts when it is set.
+	OnPermission PermissionFunc `json:"-"`
 }
 
 // CommandSpec is a shell-free process specification produced by an Engine and
@@ -63,6 +67,7 @@ type SessionRequest struct {
 	AppendSystemPrompt string            `json:"append_system_prompt,omitempty"`
 	ResumeSessionID    string            `json:"resume_session_id,omitempty"`
 	NewSessionID       string            `json:"new_session_id,omitempty"`
+	Continue           bool              `json:"continue,omitempty"`
 	MaxTurns           int               `json:"max_turns,omitempty"`
 	AllowedTools       []string          `json:"allowed_tools,omitempty"`
 	DisallowedTools    []string          `json:"disallowed_tools,omitempty"`
@@ -74,10 +79,15 @@ type SessionRequest struct {
 	// while a turn is in flight; an idle session between turns never trips it.
 	TurnIdleTimeout time.Duration `json:"-"`
 	// CloseGrace bounds Close's wait for a natural exit after stdin closes
-	// before escalating to Process.Cancel. Zero uses a 3s default.
+	// before escalating to Process.Cancel. It also bounds the wait for a turn
+	// interrupt to take effect before the process is killed. Zero uses a 3s
+	// default.
 	CloseGrace     time.Duration `json:"-"`
 	MaxFrameBytes  int           `json:"max_frame_bytes,omitempty"`
 	MaxStderrBytes int           `json:"max_stderr_bytes,omitempty"`
+	// OnPermission answers provider permission prompts (tool approvals). Nil
+	// denies every prompt; providers only emit prompts when it is set.
+	OnPermission PermissionFunc `json:"-"`
 }
 
 // TurnInput is one user turn sent into a live session.
@@ -86,6 +96,29 @@ type TurnInput struct {
 	// IdleTimeout overrides the session default for this turn; zero inherits.
 	IdleTimeout time.Duration `json:"-"`
 }
+
+// PermissionRequest is one provider tool-approval prompt.
+type PermissionRequest struct {
+	ToolName string          `json:"tool_name"`
+	Input    json.RawMessage `json:"input,omitempty"`
+	Raw      json.RawMessage `json:"raw,omitempty"`
+}
+
+// PermissionDecision answers a PermissionRequest. The zero value denies.
+type PermissionDecision struct {
+	Allow bool `json:"allow"`
+	// UpdatedInput optionally rewrites the tool input on allow; nil keeps the
+	// original input.
+	UpdatedInput json.RawMessage `json:"updated_input,omitempty"`
+	// Message is the reason reported to the agent on deny.
+	Message string `json:"message,omitempty"`
+}
+
+// PermissionFunc resolves permission prompts for a session. It runs off the
+// session's reader goroutine and may block on human input; the turn idle
+// timer is paused while a prompt is pending. The context is the in-flight
+// turn's Send context.
+type PermissionFunc func(context.Context, PermissionRequest) (PermissionDecision, error)
 
 type EventType string
 
