@@ -42,6 +42,7 @@ func prepareExtraDirs(workDir string, extras []runner.ExtraDir) ([]string, error
 	if err != nil {
 		return nil, fmt.Errorf("resolve working directory: %w", err)
 	}
+	sweepDanglingLinks(absBase)
 
 	prep := &linkPrep{base: absBase}
 	for _, extra := range extras {
@@ -121,19 +122,28 @@ func (p *linkPrep) linkExact(source string, extra runner.ExtraDir) error {
 }
 
 // link creates one symlink. An existing identical link is adopted without
-// ownership; any other existing target is skipped in merge mode (the local
-// entry wins) and an error in exact mode.
+// ownership, a dangling link is replaced; any other existing target is
+// skipped in merge mode (the local entry wins) and an error in exact mode.
 func (p *linkPrep) link(source, target string, keep, skipConflicts bool) error {
 	if existing, err := os.Lstat(target); err == nil {
+		occupied := true
 		if existing.Mode()&os.ModeSymlink != 0 {
 			if dest, err := os.Readlink(target); err == nil && dest == source {
 				return nil // adopted; not ours to remove
 			}
+			if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
+				// A dangling link must not win a conflict or fail the start:
+				// replace it.
+				_ = os.Remove(target)
+				occupied = false
+			}
 		}
-		if skipConflicts {
-			return nil // local entry wins
+		if occupied {
+			if skipConflicts {
+				return nil // local entry wins
+			}
+			return fmt.Errorf("target %q already exists", target)
 		}
-		return fmt.Errorf("target %q already exists", target)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect target %q: %w", target, err)
 	}
@@ -148,6 +158,32 @@ func (p *linkPrep) link(source, target string, keep, skipConflicts bool) error {
 		p.owned = append(p.owned, target)
 	}
 	return nil
+}
+
+// sweepDanglingLinks removes dangling symlinks from the working directory's
+// convention content dirs — leftovers of crashed runs or Keep links whose
+// source has moved or been deleted, which would otherwise break the agent
+// CLI's discovery. Best-effort: real entries and links that still resolve
+// (wherever they point) are never touched.
+func sweepDanglingLinks(base string) {
+	for _, convention := range conventionDirs {
+		for _, content := range contentDirs {
+			dir := filepath.Join(base, convention, content)
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, entry := range entries {
+				if entry.Type()&os.ModeSymlink == 0 {
+					continue
+				}
+				path := filepath.Join(dir, entry.Name())
+				if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+					_ = os.Remove(path)
+				}
+			}
+		}
+	}
 }
 
 func removeLinks(links []string) {

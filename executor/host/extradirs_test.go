@@ -150,6 +150,60 @@ func TestPrepareExtraDirsRejectsEscapesAndMissing(t *testing.T) {
 	}
 }
 
+func TestPrepareExtraDirsSweepsDanglingLinks(t *testing.T) {
+	root := contextRoot(t)
+	work := t.TempDir()
+	skillsDir := filepath.Join(work, ".claude", "skills")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// An unrelated dangling link (leftover of a crashed run) is swept.
+	unrelated := filepath.Join(skillsDir, "stale")
+	if err := os.Symlink(filepath.Join(work, "gone"), unrelated); err != nil {
+		t.Fatal(err)
+	}
+	// A healthy link pointing elsewhere is preserved and still wins conflicts.
+	elsewhere := t.TempDir()
+	foreign := filepath.Join(skillsDir, "review")
+	if err := os.Symlink(elsewhere, foreign); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: root}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(unrelated); !os.IsNotExist(err) {
+		t.Fatalf("dangling link must be swept: %v", err)
+	}
+	if dest, err := os.Readlink(foreign); err != nil || dest != elsewhere {
+		t.Fatalf("healthy foreign link must be preserved: %q %v", dest, err)
+	}
+}
+
+func TestPrepareExtraDirsReplacesDanglingTarget(t *testing.T) {
+	source := t.TempDir()
+	work := t.TempDir()
+	target := filepath.Join("ctx", "skills") // outside convention dirs: no sweep
+	abs := filepath.Join(work, target)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(work, "gone"), abs); err != nil {
+		t.Fatal(err)
+	}
+	// Exact mode: a dangling link at the target is replaced, not an error.
+	links, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: source, Target: target}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("links = %v", links)
+	}
+	if dest, err := os.Readlink(abs); err != nil || dest != source {
+		t.Fatalf("dangling target not replaced: %q %v", dest, err)
+	}
+}
+
 func TestPrepareExtraDirsRollsBackOnFailure(t *testing.T) {
 	root := contextRoot(t)
 	work := t.TempDir()
