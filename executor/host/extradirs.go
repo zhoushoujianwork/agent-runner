@@ -98,6 +98,9 @@ func (p *linkPrep) discover(source string, extra runner.ExtraDir) error {
 				return fmt.Errorf("read %q: %w", sourceDir, err)
 			}
 			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), ".") {
+					continue // hidden entries (.gitkeep/.DS_Store) are not skills/commands/agents
+				}
 				entrySource := filepath.Join(sourceDir, entry.Name())
 				entryTarget := filepath.Join(p.base, convention, content, entry.Name())
 				if err := p.link(entrySource, entryTarget, extra.Keep, true); err != nil {

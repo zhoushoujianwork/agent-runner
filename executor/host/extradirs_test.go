@@ -61,6 +61,33 @@ func TestPrepareExtraDirsDiscovery(t *testing.T) {
 	}
 }
 
+func TestPrepareExtraDirsDiscoverySkipsHiddenEntries(t *testing.T) {
+	root := contextRoot(t)
+	work := t.TempDir()
+	// A hidden entry inside a content dir must never be linked.
+	hidden := filepath.Join(root, ".claude", "skills", ".gitkeep")
+	if err := os.WriteFile(hidden, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	links, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unwanted := filepath.Join(work, ".claude", "skills", ".gitkeep")
+	for _, link := range links {
+		if link == unwanted {
+			t.Fatalf("hidden entry must not be linked: %v", links)
+		}
+	}
+	if _, err := os.Lstat(unwanted); !os.IsNotExist(err) {
+		t.Fatalf("hidden entry must not be created: %v", err)
+	}
+	// Real skills are still linked.
+	if _, err := os.Lstat(filepath.Join(work, ".claude", "skills", "review")); err != nil {
+		t.Fatalf("real skill must be linked: %v", err)
+	}
+}
+
 func TestPrepareExtraDirsDiscoveryLocalWinsAndAdopts(t *testing.T) {
 	root := contextRoot(t)
 	work := t.TempDir()
