@@ -125,6 +125,37 @@ type SessionRequest struct {
 	OnPermission PermissionFunc `json:"-"`
 }
 
+// TermSize is a terminal geometry in character cells.
+type TermSize struct {
+	Cols, Rows uint16
+}
+
+// TermRequest opens one interactive TUI process in a PTY. Fields shared with
+// SessionRequest carry identical semantics so headless and TUI runs of the
+// same conversation interoperate via the provider's own session mechanism.
+// Unlike SessionRequest, there is no OnPermission: a TUI presents its own
+// interactive approval UI in the byte stream.
+type TermRequest struct {
+	WorkDir            string            `json:"cwd,omitempty"`
+	Model              string            `json:"model,omitempty"`
+	AppendSystemPrompt string            `json:"append_system_prompt,omitempty"`
+	ResumeSessionID    string            `json:"resume_session_id,omitempty"`
+	NewSessionID       string            `json:"new_session_id,omitempty"`
+	Continue           bool              `json:"continue,omitempty"`
+	Permission         PermissionMode    `json:"permission,omitempty"`
+	MCPConfig          string            `json:"mcp_config,omitempty"`
+	AllowedTools       []string          `json:"allowed_tools,omitempty"`
+	DisallowedTools    []string          `json:"disallowed_tools,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`
+	ExtraArgs          []string          `json:"extra_args,omitempty"`
+	ExtraDirs          []ExtraDir        `json:"extra_dirs,omitempty"`
+	// Size is the initial terminal geometry; a zero field defaults to 120x32.
+	Size TermSize `json:"size,omitempty"`
+	// CloseGrace bounds Close's wait for a natural exit after the terminate
+	// signal before escalating to kill. Zero uses a 3s default.
+	CloseGrace time.Duration `json:"-"`
+}
+
 // TurnInput is one user turn sent into a live session.
 type TurnInput struct {
 	Prompt string `json:"prompt"`

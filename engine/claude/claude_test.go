@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"slices"
 	"strings"
@@ -220,5 +221,54 @@ func TestUnsupportedControlRequestAnsweredInline(t *testing.T) {
 	}
 	if !strings.Contains(string(step.Reply), `"request_id":"x-1"`) || !strings.Contains(string(step.Reply), `"subtype":"error"`) {
 		t.Fatalf("unexpected inline reply: %s", step.Reply)
+	}
+}
+
+func TestNewTermArgv(t *testing.T) {
+	spec, err := New("fake-claude").NewTerm(runner.TermRequest{
+		WorkDir:         "/workspace",
+		Model:           "sonnet",
+		ResumeSessionID: "sess-1",
+		Permission:      runner.PermissionBypass,
+		AllowedTools:    []string{"Read", "Grep"},
+		Env:             map[string]string{"X": "1"},
+		ExtraDirs:       []runner.ExtraDir{{Source: "/proj"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Interactive {
+		t.Error("term spec must not be Interactive (no stdin pipe protocol)")
+	}
+	joined := strings.Join(spec.Argv, " ")
+	for _, want := range []string{
+		"fake-claude", "--model sonnet", "--resume sess-1",
+		"--permission-mode bypassPermissions", "--allowedTools Read,Grep",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("argv %q missing %q", joined, want)
+		}
+	}
+	for _, banned := range []string{"--print", "--output-format", "--input-format", "--verbose", "--include-partial-messages"} {
+		if strings.Contains(joined, banned) {
+			t.Errorf("TUI argv must not carry protocol flag %q: %q", banned, joined)
+		}
+	}
+	if spec.Dir != "/workspace" || spec.Env["X"] != "1" || len(spec.ExtraDirs) != 1 {
+		t.Errorf("term spec did not carry dir/env/extradirs: %+v", spec)
+	}
+}
+
+func TestNewTermConversationModeExclusive(t *testing.T) {
+	_, err := New("fake-claude").NewTerm(runner.TermRequest{
+		ResumeSessionID: "a",
+		Continue:        true,
+	})
+	if err == nil {
+		t.Fatal("expected mutually-exclusive conversation mode error")
+	}
+	var runErr *runner.RunError
+	if !errors.As(err, &runErr) || runErr.Kind != runner.ErrorInvalidRequest {
+		t.Fatalf("expected invalid_request RunError, got %v", err)
 	}
 }

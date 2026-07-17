@@ -1,7 +1,7 @@
 # TUI/PTY 启动模式设计(Term Mode)
 
 Issue: [#10](https://github.com/zhoushoujianwork/agent-runner/issues/10)
-状态: 设计评审中
+状态: M1 已实施
 目标版本: v0.6.0
 
 ## 1. 背景
