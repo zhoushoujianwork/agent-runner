@@ -366,6 +366,39 @@ func TestSessionPermissionDeny(t *testing.T) {
 	}
 }
 
+// CloseInput ends the input half only: no further turns, but the process
+// winds down naturally and a clean EOF exit is not an error.
+func TestSessionCloseInput(t *testing.T) {
+	session := openSession(t, runner.SessionRequest{})
+	turn, err := session.Send(context.Background(), runner.TurnInput{Prompt: "one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := turn.Wait(); err != nil || !result.Success {
+		t.Fatalf("first turn failed: %+v %v", result, err)
+	}
+
+	if err := session.CloseInput(); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.CloseInput(); err != nil {
+		t.Fatalf("CloseInput must be idempotent: %v", err)
+	}
+	_, err = session.Send(context.Background(), runner.TurnInput{Prompt: "two"})
+	var runErr *runner.RunError
+	if !errors.As(err, &runErr) || runErr.Kind != runner.ErrorClosed {
+		t.Fatalf("send after CloseInput should fail closed, got %#v", err)
+	}
+	select {
+	case <-session.Dead():
+	case <-time.After(5 * time.Second):
+		t.Fatal("process should exit after stdin EOF")
+	}
+	if _, err := session.Exit(); err != nil {
+		t.Fatalf("clean EOF exit should not error: %v", err)
+	}
+}
+
 func TestSessionWaitDoesNotRequireEventConsumer(t *testing.T) {
 	session := openSession(t, runner.SessionRequest{})
 	turn, err := session.Send(context.Background(), runner.TurnInput{Prompt: "no consumer"})

@@ -27,7 +27,9 @@ Implemented:
 
 - persistent sessions: one `claude --print --input-format stream-json`
   process, many serial turns via `Session.Send`
-- one-shot `Runner.Run` built on the same session runtime
+- one-shot `Runner.Run` built on the same session runtime; it closes stdin
+  right after writing its only turn (`Session.CloseInput`), so agents that
+  read stdin to EOF before answering never deadlock
 - bidirectional control protocol: `can_use_tool` permission prompts answered
   through `SessionRequest.OnPermission`, turn-level interrupt frames
 - turn cancellation/idle timeout interrupts the turn first and only kills the

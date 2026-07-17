@@ -9,6 +9,8 @@
 //	"error"   read one frame, write a secret-bearing stderr line, exit 7
 //	"idle"    emit init, then stall without reading stdin (unresponsive hang)
 //	"burst"   read one frame, emit FAKE_BURST text deltas, then a result
+//	"eof"     read stdin to EOF before emitting anything (agents that gate
+//	          their output on stdin EOF, like `cat > file` wrappers)
 //
 // Session script knobs (turn numbers, 0 = off):
 //
@@ -25,6 +27,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -62,6 +65,10 @@ func main() {
 			})
 		}
 		emit(successResult("sess-burst", strings.Repeat("x", count)))
+	case "eof":
+		_, _ = io.ReadAll(os.Stdin)
+		emit(map[string]any{"type": "system", "subtype": "init", "session_id": "sess-eof"})
+		emit(successResult("sess-eof", "eof ok"))
 	case "session":
 		runScript(true)
 	default:

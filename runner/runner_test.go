@@ -51,6 +51,29 @@ func TestRunnerSuccess(t *testing.T) {
 	}
 }
 
+// Regression for issue #2: a one-shot run must close stdin right after
+// writing its only turn, so agents that read stdin to EOF before answering
+// (the v0.2.0 static-stdin contract) do not deadlock into the idle timeout.
+func TestRunnerClosesStdinForEOFGatedAgents(t *testing.T) {
+	binary := buildFakeClaude(t)
+	r := &runner.Runner{Engine: claude.New(binary), Executor: host.New(host.WithTerminationGrace(50 * time.Millisecond))}
+	handle, err := r.Run(context.Background(), runner.Request{
+		Prompt: "hello", Env: map[string]string{"FAKE_MODE": "eof"}, IdleTimeout: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range handle.Events() {
+	}
+	result, err := handle.Wait()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success || result.Text != "eof ok" || result.SessionID != "sess-eof" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
 func TestRunnerProcessErrorRedactsStderr(t *testing.T) {
 	binary := buildFakeClaude(t)
 	r := &runner.Runner{Engine: claude.New(binary), Executor: host.New(host.WithTerminationGrace(50 * time.Millisecond))}

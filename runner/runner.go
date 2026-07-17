@@ -71,6 +71,13 @@ func (r *Runner) Run(ctx context.Context, req Request) (*RunHandle, error) {
 		cancel()
 		return nil, err
 	}
+	// A one-shot run never sends a second turn, so close the input half right
+	// away: agents that read stdin to EOF before answering would otherwise
+	// deadlock against us waiting for their result (v0.2.0 static-stdin
+	// behavior). Only a pending permission callback still needs stdin.
+	if req.OnPermission == nil {
+		_ = session.CloseInput()
+	}
 
 	handle := &RunHandle{events: turn.Events(), cancel: cancel, done: make(chan struct{})}
 	go func() {

@@ -102,15 +102,16 @@ type Session struct {
 	// permission goroutines).
 	writeMu sync.Mutex
 
-	mu      sync.Mutex
-	turn    *TurnHandle
-	zombies []*TurnHandle // failed turns whose event channel the reader still owns
-	pending []Event       // events parsed while no turn was mounted (bounded)
-	closed  bool
-	dying   bool // a failed turn killed the process; refuse new turns until dead
-	dead    bool
-	exit    ExitStatus
-	deadErr error
+	mu          sync.Mutex
+	turn        *TurnHandle
+	zombies     []*TurnHandle // failed turns whose event channel the reader still owns
+	pending     []Event       // events parsed while no turn was mounted (bounded)
+	closed      bool
+	inputClosed bool // stdin closed via CloseInput; the in-flight turn may still finish
+	dying       bool // a failed turn killed the process; refuse new turns until dead
+	dead        bool
+	exit        ExitStatus
+	deadErr     error
 }
 
 // Ready is closed when the process emits its first init event (skills, tools
@@ -172,6 +173,9 @@ func (s *Session) Send(ctx context.Context, input TurnInput) (*TurnHandle, error
 	case s.closed:
 		s.mu.Unlock()
 		return nil, &RunError{Kind: ErrorClosed, Op: "session send", Err: errors.New("session is closed")}
+	case s.inputClosed:
+		s.mu.Unlock()
+		return nil, &RunError{Kind: ErrorClosed, Op: "session send", Err: errors.New("session input is closed")}
 	case s.dead:
 		exit, deadErr := s.exit, s.deadErr
 		s.mu.Unlock()
@@ -242,6 +246,31 @@ func (s *Session) writeStdin(payload []byte) error {
 	defer s.writeMu.Unlock()
 	_, err := s.stdin.Write(payload)
 	return err
+}
+
+// CloseInput closes the process stdin without retiring the session: the
+// in-flight turn keeps streaming and completes normally, but no further turns
+// can be sent. One-shot runs use it right after writing their only turn so
+// agents that read stdin to EOF before answering are not deadlocked; for the
+// real CLI it signals "no more turns", letting the process exit after the
+// current turn. Idempotent.
+func (s *Session) CloseInput() error {
+	s.mu.Lock()
+	if s.inputClosed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.inputClosed = true
+	s.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.stdin.Close()
+}
+
+func (s *Session) inputIsClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inputClosed
 }
 
 // Close retires the session: close stdin so the agent process can finish
@@ -365,7 +394,7 @@ func (s *Session) readLoop() {
 				continue
 			}
 			if len(step.Reply) > 0 {
-				if err := s.writeStdin(step.Reply); err != nil && terminalErr == nil && s.Alive() {
+				if err := s.writeStdin(step.Reply); err != nil && terminalErr == nil && s.Alive() && !s.inputIsClosed() {
 					terminalErr = &RunError{Kind: ErrorProtocol, Op: "write protocol reply", Err: err}
 					_ = s.process.Cancel()
 				}
