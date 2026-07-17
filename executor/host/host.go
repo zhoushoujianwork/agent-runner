@@ -58,6 +58,11 @@ func (e *Executor) Start(ctx context.Context, spec runner.CommandSpec) (runner.P
 		return nil, errors.New("host executor: empty argv")
 	}
 
+	extraLinks, err := placeExtraDirs(spec.Dir, spec.ExtraDirs)
+	if err != nil {
+		return nil, err
+	}
+
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
 	cmd.Dir = spec.Dir
 	cmd.Env = e.environment(spec.Env)
@@ -65,6 +70,7 @@ func (e *Executor) Start(ctx context.Context, spec runner.CommandSpec) (runner.P
 	if spec.Interactive {
 		pipe, err := cmd.StdinPipe()
 		if err != nil {
+			removeLinks(extraLinks)
 			return nil, fmt.Errorf("host executor stdin: %w", err)
 		}
 		stdinWriter = pipe
@@ -75,12 +81,14 @@ func (e *Executor) Start(ctx context.Context, spec runner.CommandSpec) (runner.P
 
 	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
+		removeLinks(extraLinks)
 		return nil, fmt.Errorf("host executor stdout: %w", err)
 	}
 	stderr, stderrWriter, err := os.Pipe()
 	if err != nil {
 		_ = stdout.Close()
 		_ = stdoutWriter.Close()
+		removeLinks(extraLinks)
 		return nil, fmt.Errorf("host executor stderr: %w", err)
 	}
 	cmd.Stdout = stdoutWriter
@@ -90,18 +98,20 @@ func (e *Executor) Start(ctx context.Context, spec runner.CommandSpec) (runner.P
 		_ = stdoutWriter.Close()
 		_ = stderr.Close()
 		_ = stderrWriter.Close()
+		removeLinks(extraLinks)
 		return nil, fmt.Errorf("host executor start %q: %w", spec.Argv[0], err)
 	}
 	_ = stdoutWriter.Close()
 	_ = stderrWriter.Close()
 
 	process := &hostProcess{
-		cmd:    cmd,
-		stdin:  stdinWriter,
-		stdout: stdout,
-		stderr: stderr,
-		grace:  e.terminationGrace,
-		done:   make(chan struct{}),
+		cmd:        cmd,
+		stdin:      stdinWriter,
+		stdout:     stdout,
+		stderr:     stderr,
+		grace:      e.terminationGrace,
+		done:       make(chan struct{}),
+		extraLinks: extraLinks,
 	}
 	go process.reap()
 	go func() {
@@ -149,6 +159,9 @@ type hostProcess struct {
 	stderr io.Reader
 	grace  time.Duration
 	done   chan struct{}
+	// extraLinks are the symlinks this process created for its ExtraDirs;
+	// they are removed when the process is reaped.
+	extraLinks []string
 
 	cancelOnce sync.Once
 	mu         sync.RWMutex
@@ -203,5 +216,6 @@ func (p *hostProcess) reap() {
 	p.status = status
 	p.waitErr = err
 	p.mu.Unlock()
+	removeLinks(p.extraLinks)
 	close(p.done)
 }

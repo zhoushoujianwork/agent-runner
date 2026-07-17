@@ -43,6 +43,7 @@ func (r *Runner) Run(ctx context.Context, req Request) (*RunHandle, error) {
 		Permission:         req.Permission,
 		Env:                req.Env,
 		ExtraArgs:          req.ExtraArgs,
+		ExtraDirs:          req.ExtraDirs,
 		MaxFrameBytes:      req.MaxFrameBytes,
 		MaxStderrBytes:     req.MaxStderrBytes,
 		OnPermission:       req.OnPermission,

@@ -42,9 +42,25 @@ type Request struct {
 	IdleTimeout        time.Duration     `json:"-"`
 	MaxFrameBytes      int               `json:"max_frame_bytes,omitempty"`
 	MaxStderrBytes     int               `json:"max_stderr_bytes,omitempty"`
+	// ExtraDirs declares project-level context source directories that the
+	// executor links into WorkDir before the process starts and removes on
+	// exit. See ExtraDir for placement semantics.
+	ExtraDirs []ExtraDir `json:"extra_dirs,omitempty"`
 	// OnPermission answers provider permission prompts (tool approvals). Nil
 	// denies every prompt; providers only emit prompts when it is set.
 	OnPermission PermissionFunc `json:"-"`
+}
+
+// ExtraDir declares one context source directory to make visible inside the
+// agent's WorkDir. Placement is the executor backend's responsibility (host
+// uses a symlink, future docker uses a bind mount); the Engine never sees it.
+type ExtraDir struct {
+	// Source is an existing directory the executor exposes inside WorkDir.
+	Source string `json:"source"`
+	// Target is the placement location relative to WorkDir. It must not be an
+	// absolute path and must not escape WorkDir via "..". Empty defaults to
+	// ".claude/<basename(Source)>".
+	Target string `json:"target,omitempty"`
 }
 
 // CommandSpec is a shell-free process specification produced by an Engine and
@@ -57,6 +73,10 @@ type CommandSpec struct {
 	// Interactive requests a writable stdin pipe instead of the static Stdin
 	// bytes. The started Process must implement StdinWriter.
 	Interactive bool
+	// ExtraDirs are context source directories the Engine forwards verbatim
+	// from the request. The executor places them into Dir before start and
+	// removes the links it created on exit; the Engine never interprets them.
+	ExtraDirs []ExtraDir
 }
 
 // SessionRequest opens one persistent agent process that accepts many turns.
@@ -85,6 +105,10 @@ type SessionRequest struct {
 	CloseGrace     time.Duration `json:"-"`
 	MaxFrameBytes  int           `json:"max_frame_bytes,omitempty"`
 	MaxStderrBytes int           `json:"max_stderr_bytes,omitempty"`
+	// ExtraDirs declares project-level context source directories that the
+	// executor links into WorkDir before the process starts and removes on
+	// exit. See ExtraDir for placement semantics.
+	ExtraDirs []ExtraDir `json:"extra_dirs,omitempty"`
 	// OnPermission answers provider permission prompts (tool approvals). Nil
 	// denies every prompt; providers only emit prompts when it is set.
 	OnPermission PermissionFunc `json:"-"`

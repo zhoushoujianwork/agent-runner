@@ -119,6 +119,29 @@ if err != nil {
 result, err := turn.Wait()
 ```
 
+Project context via `ExtraDirs`: when the agent's `WorkDir` is not the project
+directory itself (e.g. an isolated workspace), declare the context sources to
+expose inside it. The executor links them in before the process starts and
+removes the links it created on exit.
+
+```go
+handle, err := r.Run(ctx, runner.Request{
+    WorkDir: "/workspaces/task-42",
+    ExtraDirs: []runner.ExtraDir{
+        {Source: "/repos/myproj/.claude/skills"},              // -> <cwd>/.claude/skills
+        {Source: "/shared/agents", Target: ".claude/agents"},  // explicit target
+    },
+})
+```
+
+`Target` is relative to `WorkDir`; it defaults to `.claude/<basename(Source)>`,
+must not be absolute, and must not escape `WorkDir` via `..`. `Source` must be
+an existing directory. If `Target` already exists the start fails, unless it is
+already a symlink to the same `Source` (adopted idempotently and left in place
+on exit). Placement is the executor backend's concern — host uses a symlink, a
+future docker backend would use a bind mount — so the Engine never sees it. When
+several sessions share one `WorkDir`, whoever created a link cleans it up.
+
 Cancelling a turn's context (or hitting its idle timeout) sends the protocol's
 interrupt frame first; the session survives when the agent complies within
 `CloseGrace`, so the next `Send` reuses the warmed-up process.
@@ -137,8 +160,13 @@ bin/agent-runner doctor
 bin/agent-runner run \
   --cwd /path/to/repository \
   --permission default \
+  --extra-dir /repos/myproj/.claude/skills \
+  --extra-dir /shared/agents=.claude/agents \
   --prompt 'Find the failing test and explain it'
 ```
+
+`--extra-dir SOURCE[=TARGET]` is repeatable and mirrors the SDK `ExtraDirs`
+field; omit `=TARGET` to default to `.claude/<basename(SOURCE)>`.
 
 The CLI writes one JSON event per stdout line. Human-readable terminal errors
 go to stderr.
@@ -151,7 +179,11 @@ printf '%s\n' '{
   "cwd": "/path/to/repository",
   "permission": "bypass",
   "wall_timeout": "30m",
-  "idle_timeout": "5m"
+  "idle_timeout": "5m",
+  "extra_dirs": [
+    {"source": "/repos/myproj/.claude/skills"},
+    {"source": "/shared/agents", "target": ".claude/agents"}
+  ]
 }' | bin/agent-runner run --request -
 ```
 
