@@ -43,6 +43,8 @@ func prepareExtraDirs(workDir string, extras []runner.ExtraDir) ([]string, error
 		return nil, fmt.Errorf("resolve working directory: %w", err)
 	}
 
+	sweepDanglingLinks(absBase)
+
 	prep := &linkPrep{base: absBase}
 	for _, extra := range extras {
 		if strings.TrimSpace(extra.Source) == "" {
@@ -120,20 +122,33 @@ func (p *linkPrep) linkExact(source string, extra runner.ExtraDir) error {
 	return p.link(source, target, extra.Keep, false)
 }
 
-// link creates one symlink. An existing identical link is adopted without
-// ownership; any other existing target is skipped in merge mode (the local
-// entry wins) and an error in exact mode.
+// link creates one symlink. A dangling link occupying the target is removed
+// first (it deserves neither the merge-mode skip nor the exact-mode error).
+// An existing identical link is adopted without ownership; any other existing
+// target is skipped in merge mode (the local entry wins) and an error in exact
+// mode.
 func (p *linkPrep) link(source, target string, keep, skipConflicts bool) error {
 	if existing, err := os.Lstat(target); err == nil {
 		if existing.Mode()&os.ModeSymlink != 0 {
-			if dest, err := os.Readlink(target); err == nil && dest == source {
+			// A dangling link is dead weight: clear it before the adopt/skip
+			// checks so it never blocks a fresh mount.
+			if _, statErr := os.Stat(target); errors.Is(statErr, os.ErrNotExist) {
+				if err := os.Remove(target); err != nil {
+					return fmt.Errorf("remove dangling target %q: %w", target, err)
+				}
+			} else if dest, err := os.Readlink(target); err == nil && dest == source {
 				return nil // adopted; not ours to remove
+			} else {
+				if skipConflicts {
+					return nil // local entry wins
+				}
+				return fmt.Errorf("target %q already exists", target)
 			}
-		}
-		if skipConflicts {
+		} else if skipConflicts {
 			return nil // local entry wins
+		} else {
+			return fmt.Errorf("target %q already exists", target)
 		}
-		return fmt.Errorf("target %q already exists", target)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect target %q: %w", target, err)
 	}
@@ -148,6 +163,33 @@ func (p *linkPrep) link(source, target string, keep, skipConflicts bool) error {
 		p.owned = append(p.owned, target)
 	}
 	return nil
+}
+
+// sweepDanglingLinks removes dead symlinks left in the convention dirs by a
+// prior run (host killed, power loss, or a Keep link whose source moved).
+// Only the top-level entries of <base>/{.claude,.agent}/{skills,agents,commands}
+// are inspected; real files/dirs and links pointing at existing targets stay.
+// Best-effort: permission errors and the like never block startup.
+func sweepDanglingLinks(base string) {
+	for _, convention := range conventionDirs {
+		for _, content := range contentDirs {
+			dir := filepath.Join(base, convention, content)
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, entry := range entries {
+				target := filepath.Join(dir, entry.Name())
+				info, err := os.Lstat(target)
+				if err != nil || info.Mode()&os.ModeSymlink == 0 {
+					continue // real file/dir or vanished; leave it
+				}
+				if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
+					_ = os.Remove(target) // dangling; best-effort
+				}
+			}
+		}
+	}
 }
 
 func removeLinks(links []string) {
