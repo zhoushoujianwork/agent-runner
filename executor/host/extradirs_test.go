@@ -153,54 +153,113 @@ func TestPrepareExtraDirsRejectsEscapesAndMissing(t *testing.T) {
 func TestPrepareExtraDirsSweepsDanglingLinks(t *testing.T) {
 	root := contextRoot(t)
 	work := t.TempDir()
+
+	// An unrelated dead link left by a prior run: its source is gone.
 	skillsDir := filepath.Join(work, ".claude", "skills")
 	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// An unrelated dangling link (leftover of a crashed run) is swept.
-	unrelated := filepath.Join(skillsDir, "stale")
-	if err := os.Symlink(filepath.Join(work, "gone"), unrelated); err != nil {
+	dangling := filepath.Join(skillsDir, "orphan")
+	if err := os.Symlink(filepath.Join(work, "gone"), dangling); err != nil {
 		t.Fatal(err)
 	}
-	// A healthy link pointing elsewhere is preserved and still wins conflicts.
+	// A healthy link pointing elsewhere survives and still wins the conflict
+	// against the incoming "review" entry.
 	elsewhere := t.TempDir()
 	foreign := filepath.Join(skillsDir, "review")
 	if err := os.Symlink(elsewhere, foreign); err != nil {
+		t.Fatal(err)
+	}
+	// A valid external link in another convention dir survives untouched.
+	external := filepath.Join(work, ".agent", "commands")
+	if err := os.MkdirAll(external, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	extLink := filepath.Join(external, "keepme")
+	if err := os.Symlink(elsewhere, extLink); err != nil {
+		t.Fatal(err)
+	}
+	// A real file must never be swept.
+	realFile := filepath.Join(work, ".claude", "agents", "local.md")
+	if err := os.MkdirAll(filepath.Dir(realFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(realFile, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	if _, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: root}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(unrelated); !os.IsNotExist(err) {
+	if _, err := os.Lstat(dangling); !os.IsNotExist(err) {
 		t.Fatalf("dangling link must be swept: %v", err)
 	}
 	if dest, err := os.Readlink(foreign); err != nil || dest != elsewhere {
 		t.Fatalf("healthy foreign link must be preserved: %q %v", dest, err)
 	}
+	if _, err := os.Lstat(extLink); err != nil {
+		t.Fatalf("valid external link must survive: %v", err)
+	}
+	if _, err := os.Lstat(realFile); err != nil {
+		t.Fatalf("real file must survive: %v", err)
+	}
 }
 
-func TestPrepareExtraDirsReplacesDanglingTarget(t *testing.T) {
-	source := t.TempDir()
+func TestPrepareExtraDirsReplacesDanglingTargetDiscovery(t *testing.T) {
+	root := contextRoot(t)
 	work := t.TempDir()
-	target := filepath.Join("ctx", "skills") // outside convention dirs: no sweep
-	abs := filepath.Join(work, target)
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+	// The target position holds a dead link pointing at a since-moved source.
+	target := filepath.Join(work, ".claude", "skills", "review")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(work, "gone"), abs); err != nil {
+	if err := os.Symlink(filepath.Join(work, "moved-away"), target); err != nil {
 		t.Fatal(err)
 	}
-	// Exact mode: a dangling link at the target is replaced, not an error.
-	links, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: source, Target: target}})
+	links, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: root}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(links) != 1 {
+	// The dead link must be replaced by a fresh, owned link, not skipped.
+	dest, err := os.Readlink(target)
+	if err != nil {
+		t.Fatalf("target should be relinked: %v", err)
+	}
+	if want := filepath.Join(root, ".claude", "skills", "review"); dest != want {
+		t.Fatalf("target -> %s, want %s", dest, want)
+	}
+	var owned bool
+	for _, l := range links {
+		if l == target {
+			owned = true
+		}
+	}
+	if !owned {
+		t.Fatalf("replaced dangling target must be owned: %v", links)
+	}
+}
+
+func TestPrepareExtraDirsReplacesDanglingTargetExact(t *testing.T) {
+	source := t.TempDir()
+	work := t.TempDir()
+	rel := filepath.Join("ctx", "skills") // outside convention dirs: no sweep
+	target := filepath.Join(work, rel)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A dead link at the exact target must be replaced, not raise a conflict.
+	if err := os.Symlink(filepath.Join(work, "vanished"), target); err != nil {
+		t.Fatal(err)
+	}
+	links, err := prepareExtraDirs(work, []runner.ExtraDir{{Source: source, Target: rel}})
+	if err != nil {
+		t.Fatalf("dangling target must be replaced, not error: %v", err)
+	}
+	if len(links) != 1 || links[0] != target {
 		t.Fatalf("links = %v", links)
 	}
-	if dest, err := os.Readlink(abs); err != nil || dest != source {
-		t.Fatalf("dangling target not replaced: %q %v", dest, err)
+	if dest, err := os.Readlink(target); err != nil || dest != source {
+		t.Fatalf("target -> %s (%v), want %s", dest, err, source)
 	}
 }
 

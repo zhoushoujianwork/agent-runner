@@ -121,27 +121,28 @@ func (p *linkPrep) linkExact(source string, extra runner.ExtraDir) error {
 	return p.link(source, target, extra.Keep, false)
 }
 
-// link creates one symlink. An existing identical link is adopted without
-// ownership, a dangling link is replaced; any other existing target is
-// skipped in merge mode (the local entry wins) and an error in exact mode.
+// link creates one symlink. A dangling link occupying the target is removed
+// first — it deserves neither adoption, nor the merge-mode skip, nor the
+// exact-mode error. An existing identical link is adopted without ownership;
+// any other existing target is skipped in merge mode (the local entry wins)
+// and an error in exact mode.
 func (p *linkPrep) link(source, target string, keep, skipConflicts bool) error {
 	if existing, err := os.Lstat(target); err == nil {
-		occupied := true
 		if existing.Mode()&os.ModeSymlink != 0 {
-			if dest, err := os.Readlink(target); err == nil && dest == source {
+			if _, statErr := os.Stat(target); errors.Is(statErr, os.ErrNotExist) {
+				if err := os.Remove(target); err != nil {
+					return fmt.Errorf("remove dangling target %q: %w", target, err)
+				}
+			} else if dest, err := os.Readlink(target); err == nil && dest == source {
 				return nil // adopted; not ours to remove
-			}
-			if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
-				// A dangling link must not win a conflict or fail the start:
-				// replace it.
-				_ = os.Remove(target)
-				occupied = false
-			}
-		}
-		if occupied {
-			if skipConflicts {
+			} else if skipConflicts {
 				return nil // local entry wins
+			} else {
+				return fmt.Errorf("target %q already exists", target)
 			}
+		} else if skipConflicts {
+			return nil // local entry wins
+		} else {
 			return fmt.Errorf("target %q already exists", target)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -160,11 +161,13 @@ func (p *linkPrep) link(source, target string, keep, skipConflicts bool) error {
 	return nil
 }
 
-// sweepDanglingLinks removes dangling symlinks from the working directory's
-// convention content dirs — leftovers of crashed runs or Keep links whose
-// source has moved or been deleted, which would otherwise break the agent
-// CLI's discovery. Best-effort: real entries and links that still resolve
-// (wherever they point) are never touched.
+// sweepDanglingLinks removes dead symlinks left in the convention content
+// dirs by a prior run — host killed uncleanly, or a Keep link whose source
+// has moved or been deleted — which would otherwise break the agent CLI's
+// discovery. Only the top-level entries of
+// <base>/{.claude,.agent}/{skills,agents,commands} are inspected; real
+// files/dirs and links that still resolve (wherever they point) are never
+// touched. Best-effort: permission errors and the like never block startup.
 func sweepDanglingLinks(base string) {
 	for _, convention := range conventionDirs {
 		for _, content := range contentDirs {
