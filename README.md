@@ -19,6 +19,7 @@ runner/               core runtime and provider-neutral contracts (public API)
 engine/claude/        Claude Code stream-json engine incl. control protocol
 executor/host/        host process backend (docker, sandbox: future)
 internal/fakeclaude/  scriptable fake Claude CLI for contract tests
+internal/faketui/     scriptable fake TUI process for PTY contract tests
 ```
 
 ## Status
@@ -45,7 +46,12 @@ Implemented:
   `.claude`/`.agent` skills, agents and commands are merged into the process
   working directory entry by entry, so the CLI's own discovery picks them up;
   local entries win, links are removed on exit unless `Keep`
-- fake-Claude contract tests that consume no model quota
+- TUI/PTY term mode (`Runner.OpenTerm`): the interactive CLI runs inside a
+  pseudo-terminal with raw byte-stream Input/Output/Resize — zero-parse
+  conduit for terminal mirroring (xterm.js), sharing session/resume
+  semantics and ExtraDirs with headless runs (see docs/term-mode.md;
+  Unix only for now)
+- fake-Claude and fake-TUI contract tests that consume no model quota
 
 Not implemented yet: CLI `serve` mode for sessions, Docker and remote sandbox
 executors, persistent session store, Windows Job Objects, provider failover
