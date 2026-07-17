@@ -132,6 +132,34 @@ if err != nil {
 result, err := turn.Wait()
 ```
 
+Project context via `ExtraDirs`: when the agent's `WorkDir` is not the project
+directory itself (e.g. an isolated workspace), point at the context roots to
+expose inside it. The executor discovers each root's `.claude/` and `.agent/`
+convention dirs and links the entries of their `skills/`, `agents/` and
+`commands/` into the same relative place under `WorkDir`, entry by entry, so
+the agent CLI's own discovery mechanism picks them up.
+
+```go
+handle, err := r.Run(ctx, runner.Request{
+    WorkDir: "/workspaces/task-42",
+    ExtraDirs: []runner.ExtraDir{
+        {Source: "/repos/myproj"},                             // discovery mode
+        {Source: "/repos/lib", Keep: true},                    // links survive exit
+        {Source: "/shared/context", Target: ".claude/shared"}, // exact mode
+    },
+})
+```
+
+In discovery mode local entries win (skipped silently), identical existing
+links are adopted without ownership, and a root without convention dirs is a
+silent no-op. Setting `Target` (relative to `WorkDir`, no escaping) switches to
+exact mode: `Source` itself is linked verbatim and an existing `Target` is an
+error. Links created by the run are removed when the process exits unless
+`Keep` is set; adopted links are never touched. Placement is the executor
+backend's concern — host uses symlinks, a future docker backend would use bind
+mounts — so the Engine never sees it. When several sessions share one
+`WorkDir`, whoever created a link cleans it up.
+
 Cancelling a turn's context (or hitting its idle timeout) sends the protocol's
 interrupt frame first; the session survives when the agent complies within
 `CloseGrace`, so the next `Send` reuses the warmed-up process.
@@ -148,10 +176,16 @@ go build -o bin/agent-runner ./cmd/agent-runner
 bin/agent-runner doctor
 
 bin/agent-runner run \
-  --cwd /path/to/repository \
+  --cwd /workspaces/task-42 \
   --permission default \
+  --extra-dir /repos/myproj \
+  --extra-dir /shared/context=.claude/shared \
   --prompt 'Find the failing test and explain it'
 ```
+
+`--extra-dir SOURCE[=TARGET]` is repeatable and mirrors the SDK `ExtraDirs`
+field: bare `SOURCE` is a context root scanned for `.claude`/`.agent` content,
+`SOURCE=TARGET` is an exact link.
 
 The CLI writes one JSON event per stdout line. Human-readable terminal errors
 go to stderr.
@@ -164,7 +198,11 @@ printf '%s\n' '{
   "cwd": "/path/to/repository",
   "permission": "bypass",
   "wall_timeout": "30m",
-  "idle_timeout": "5m"
+  "idle_timeout": "5m",
+  "extra_dirs": [
+    {"source": "/repos/myproj/.claude/skills"},
+    {"source": "/shared/agents", "target": ".claude/agents"}
+  ]
 }' | bin/agent-runner run --request -
 ```
 

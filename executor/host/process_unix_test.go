@@ -70,3 +70,38 @@ func waitForPID(t *testing.T, path string) int {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestExtraDirLinkLifecycle(t *testing.T) {
+	work := t.TempDir()
+	src := t.TempDir()
+	link := filepath.Join(work, ".claude", "ctx")
+	sawFile := filepath.Join(t.TempDir(), "saw")
+	// The child records whether the link was visible, then exits.
+	process, err := New().Start(context.Background(), runner.CommandSpec{
+		Argv:      []string{"/bin/sh", "-c", `[ -L "$LINK" ] && echo yes > "$SAW"`},
+		Dir:       work,
+		Env:       map[string]string{"LINK": link, "SAW": sawFile},
+		ExtraDirs: []runner.ExtraDir{{Source: src, Target: filepath.Join(".claude", "ctx")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(sawFile)
+	if err != nil || strings.TrimSpace(string(data)) != "yes" {
+		t.Fatalf("link was not visible during run: %q %v", data, err)
+	}
+	// After reap the link this process created must be gone.
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, statErr := os.Lstat(link); os.IsNotExist(statErr) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("link not cleaned up after exit")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
