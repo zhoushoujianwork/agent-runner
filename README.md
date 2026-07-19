@@ -17,7 +17,10 @@ added without touching session or stream-parsing logic.
 cmd/agent-runner/     NDJSON CLI
 runner/               core runtime and provider-neutral contracts (public API)
 engine/claude/        Claude Code stream-json engine incl. control protocol
+engine/claude/termscrape/  claude TUI screen interpreter (reply/boundary/menus)
 executor/host/        host process backend (docker, sandbox: future)
+termscreen/           server-side VT emulator with scrollback (engine-neutral)
+termmirror/           semantic mirror: raw tee + TermSemantics observations
 internal/fakeclaude/  scriptable fake Claude CLI for contract tests
 internal/faketui/     scriptable fake TUI process for PTY contract tests
 ```
@@ -51,6 +54,12 @@ Implemented:
   conduit for terminal mirroring (xterm.js), sharing session/resume
   semantics and ExtraDirs with headless runs (see docs/term-mode.md;
   Unix only for now)
+- TUI semantic mode (`termmirror` + the `TermSemantics` engine capability):
+  tee the terminal bytes into a server-side VT screen (`termscreen`) and get
+  structured observations — newest reply text, turn-end edges, blocking
+  permission menus with answerable options — while the raw passthrough stays
+  byte-exact; the claude screen interpreter lives in
+  `engine/claude/termscrape` with its case catalog (CASES.md)
 - fake-Claude and fake-TUI contract tests that consume no model quota
 
 Not implemented yet: CLI `serve` mode for sessions, Docker and remote sandbox

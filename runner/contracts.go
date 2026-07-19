@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"time"
+
+	"github.com/zhoushoujianwork/agent-runner/termscreen"
 )
 
 // Engine translates a provider-neutral session request into one bidirectional
@@ -119,4 +121,61 @@ type Process interface {
 	Wait() (ExitStatus, error)
 	Cancel() error
 	PID() int
+}
+
+// TermSemantics is the optional engine capability that interprets a TUI screen
+// semantically — the "how to read this CLI's screen" knowledge (reply blocks,
+// working/idle state, blocking menus) that would otherwise be re-implemented by
+// every caller doing screen scraping. Engines without it leave TUI bytes
+// uninterpreted; termmirror.New returns ErrBackendUnsupported.
+type TermSemantics interface {
+	// NewTermObserver binds a fresh observer to a mirrored screen. One observer
+	// per process; it is not goroutine-safe (the caller serialises access, as
+	// termmirror does).
+	NewTermObserver(screen *termscreen.Screen) TermObserver
+}
+
+// TermObserver reads a mirrored TUI screen and reports its current semantics.
+type TermObserver interface {
+	// NewTurn resets per-turn state (extraction baseline, turn boundary). Call
+	// it right after injecting a user turn into the terminal.
+	NewTurn()
+	// Observe samples the screen. now is the observation time; hadBytes
+	// reports whether terminal output arrived since the previous call —
+	// silence ticks (hadBytes=false) drive turn-boundary detection.
+	Observe(now time.Time, hadBytes bool) TermObservation
+}
+
+// TermObservation is one semantic sample of a TUI screen.
+type TermObservation struct {
+	// Reply is the newest assistant reply as normalized speakable text.
+	Reply string
+	// ReplyChanged reports that Reply differs from the previous observation
+	// (spinner redraws and unrelated repaints do not set it).
+	ReplyChanged bool
+	// TurnEnded reports that boundary detection judged the in-flight turn
+	// finished (output settled, no spinner, idle prompt back, no blocking menu).
+	TurnEnded bool
+	// Prompt is the blocking interactive menu currently awaiting an answer
+	// (tool permission, edit confirm, trust, upsell), nil when none. Answer it
+	// by writing the chosen option's Key to the terminal input.
+	Prompt *TermPrompt
+}
+
+// TermPrompt is a parsed blocking select-menu on the TUI screen.
+type TermPrompt struct {
+	Kind     string // "permission" | "editConfirm" | "upsell" | "trust" | "unknown"
+	Question string
+	Options  []TermPromptOption
+	// Signature fingerprints the option set; a changed signature means a new
+	// menu superseded the previous one.
+	Signature string
+}
+
+// TermPromptOption is one selectable menu row; Key is the literal input to
+// write (a digit today) to pick it, Default marks the highlighted row.
+type TermPromptOption struct {
+	Key     string
+	Label   string
+	Default bool
 }
